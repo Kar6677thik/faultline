@@ -3,17 +3,29 @@
 import json
 import time
 
+from faultline.adapters import AdapterError, bundled_adapter, source_identity
 from faultline.artifacts import Bundle
+from faultline.deadlines import DeadlineExceeded, RunDeadlines, check_alarm_available
 from faultline.environment import Environment, client_and_preflight
+from faultline.locking import execution_lock
 from faultline.models import canonical_bytes, verdict
-from faultline.verifier import validate_baseline, verify
 
 
-def execute_attempts(scenario, transport, emit, run_id, *, clock=time.monotonic, sleep=time.sleep):
+def execute_attempts(
+    scenario,
+    transport,
+    emit,
+    run_id,
+    *,
+    clock=time.monotonic,
+    sleep=time.sleep,
+    attempts=None,
+    applied=None,
+):
     operation = scenario.operations[0]
     body = canonical_bytes(operation.request.body.model_dump()).decode()
-    attempts = []
-    applied = set()
+    attempts = [] if attempts is None else attempts
+    applied = set() if applied is None else applied
     started = clock()
     complete = True
     for index in range(1, operation.retry.max_attempts + 1):
@@ -101,51 +113,120 @@ def execute_attempts(scenario, transport, emit, run_id, *, clock=time.monotonic,
 
 
 def run_one(scenario, variant, output, *, client=None, platform_info=None):
-    owns_client = client is None
-    if client is None:
-        client, platform_info = client_and_preflight()
-    bundle = Bundle(output, scenario, variant)
-    bundle.manifest["platform"] = platform_info
-    bundle.save_manifest()
-    env = Environment(client, bundle, platform_info["images"])
+    # Direct Python callers must exclude recovery just as CLI callers do.
+    adapter = bundled_adapter()
+    adapter.validate(scenario, variant)
+    check_alarm_available()
+    with execution_lock(output):
+        owns_client = client is None
+        if client is None:
+            client, platform_info = client_and_preflight()
+        try:
+            return _run_one(
+                scenario,
+                variant,
+                output,
+                adapter=adapter,
+                client=client,
+                platform_info=platform_info,
+            )
+        except DeadlineExceeded as exc:
+            # Initialization/finalization may have no time to write a complete report.
+            raise RuntimeError(f"{exc}; partial evidence retained under {output}/runs") from exc
+        finally:
+            if owns_client:
+                client.close()
+
+
+def _run_one(scenario, variant, output, *, adapter, client=None, platform_info=None):
+    limits = scenario.limits
+    deadlines = RunDeadlines(limits)
+    with deadlines.stage("initializing", limits.provisioning_ms, started=deadlines.started):
+        bundle = Bundle(output, scenario, variant)
+        bundle.manifest["platform"] = platform_info
+        bundle.save_manifest()
+        env = Environment(client, bundle, platform_info["images"])
     findings, diagnostics, attempts = [], [], []
     applied = set()
     complete = False
     interrupted = False
     cleanup = {"complete": False, "remaining_resources": []}
     try:
-        bundle.stage("provisioning")
-        env.provision(variant)
-        baseline = env.snapshot("baseline")
-        validate_baseline(baseline)
-        bundle.write("snapshots/baseline.json", baseline)
-        bundle.event("baseline_captured", {"content_hash": baseline["content_hash"]})
-        env.start_application(variant)
-        bundle.stage("ready")
-        bundle.stage("executing")
-        attempts, applied, complete = execute_attempts(
-            scenario,
-            lambda request: env.call(
-                "worker", "http", json.dumps(request), timeout=request["timeout_ms"] / 1000 + 2
-            ),
-            bundle.event,
-            bundle.run_id,
-        )
-        bundle.stage("draining")
-        graceful = env.drain(scenario.limits.drain_ms)
-        bundle.event(
-            "quiescence",
-            {"method": "graceful_process_exit_and_database_sessions", "graceful_exit": graceful},
-        )
-        bundle.stage("observing")
-        final = env.snapshot("final")
-        final["quiescent"] &= graceful
-        bundle.write("snapshots/final.json", final)
-        bundle.event("snapshot_captured", {"content_hash": final["content_hash"]})
-        bundle.stage("verifying")
-        findings = verify(scenario, baseline, final, attempts, workload_complete=complete)
-        for finding in findings:
-            bundle.event("invariant_evaluated", finding)
+        with deadlines.stage("provisioning", limits.provisioning_ms, started=deadlines.started):
+            bundle.stage("provisioning")
+            identity = source_identity()
+            bundle.write(
+                "adapter.json",
+                {
+                    "adapter_artifact_version": 1,
+                    "description": adapter.description.model_dump(),
+                    "identity": identity,
+                },
+            )
+            bundle.manifest["adapter"] = {
+                "adapter_id": adapter.description.adapter_id,
+                "boundary_version": adapter.description.boundary_version,
+                "package": identity["package"],
+                "package_version": identity["package_version"],
+                "content_hash": identity["content_hash"],
+                "artifact": "adapter.json",
+            }
+            bundle.save_manifest()
+            bundle.event("adapter_selected", bundle.manifest["adapter"])
+            env.provision()
+            baseline = adapter.prepare(env, variant)
+            bundle.write("snapshots/baseline.json", baseline)
+            bundle.event("baseline_captured", {"content_hash": baseline["content_hash"]})
+            env.start_application(variant)
+            adapter.readiness(env)
+            bundle.stage("ready")
+        try:
+            with deadlines.stage("executing", limits.execution_ms):
+                bundle.stage("executing")
+                attempts, applied, complete = execute_attempts(
+                    scenario,
+                    lambda request: env.call(
+                        "worker",
+                        "http",
+                        json.dumps(request),
+                        timeout=request["timeout_ms"] / 1000 + 2,
+                    ),
+                    bundle.event,
+                    bundle.run_id,
+                    attempts=attempts,
+                    applied=applied,
+                )
+        except DeadlineExceeded as exc:
+            complete = False
+            diagnostics.append(exc.diagnostic("warning"))
+        graceful = False
+        try:
+            with deadlines.stage("draining", limits.drain_ms):
+                bundle.stage("draining")
+                graceful = adapter.quiesce(env, limits.drain_ms)
+        except DeadlineExceeded as exc:
+            graceful = False
+            diagnostics.append(exc.diagnostic("warning"))
+        with deadlines.stage("observing", limits.observation_ms):
+            bundle.event(
+                "quiescence",
+                {
+                    "method": "graceful_process_exit_and_database_sessions",
+                    "graceful_exit": graceful,
+                },
+            )
+            bundle.stage("observing")
+            final = adapter.snapshot(env, "final")
+            final["quiescent"] &= graceful
+            bundle.write("snapshots/final.json", final)
+            bundle.event("snapshot_captured", {"content_hash": final["content_hash"]})
+        with deadlines.stage("verifying", limits.verification_ms):
+            bundle.stage("verifying")
+            findings = adapter.verify(
+                scenario, baseline, final, attempts, workload_complete=complete
+            )
+            for finding in findings:
+                bundle.event("invariant_evaluated", finding)
         if not graceful:
             diagnostics.append(
                 {
@@ -163,6 +244,10 @@ def run_one(scenario, variant, output, *, client=None, platform_info=None):
                 "message": "Run interrupted; no new work admitted",
             }
         )
+    except DeadlineExceeded as exc:
+        diagnostics.append(exc.diagnostic())
+    except AdapterError as exc:
+        diagnostics.append(exc.diagnostic())
     except Exception as exc:
         diagnostics.append(
             {
@@ -172,7 +257,26 @@ def run_one(scenario, variant, output, *, client=None, platform_info=None):
             }
         )
     finally:
-        cleanup = env.cleanup()
+        cleanup_end, finalization_end = deadlines.cleanup_windows()
+        try:
+            with deadlines.until("cleanup", cleanup_end, "cleanup"):
+                cleanup = env.cleanup()
+        except (DeadlineExceeded, KeyboardInterrupt, Exception) as exc:
+            if isinstance(exc, KeyboardInterrupt):
+                interrupted = True
+            cleanup = {
+                "complete": False,
+                "remaining_resources": env.cleanup_remaining or bundle.manifest["resources"],
+            }
+            diagnostics.append(
+                exc.diagnostic()
+                if isinstance(exc, DeadlineExceeded)
+                else {
+                    "severity": "error",
+                    "code": "cleanup_interrupted",
+                    "message": "Cleanup interrupted or failed; recorded resources may remain",
+                }
+            )
         if not cleanup["complete"]:
             diagnostics.append(
                 {
@@ -181,18 +285,43 @@ def run_one(scenario, variant, output, *, client=None, platform_info=None):
                     "message": "Owned resources remain; use faultline clean --run",
                 }
             )
-        try:
-            bundle.event("cleanup", cleanup)
-        except OSError:
-            diagnostics.append(
-                {
-                    "severity": "error",
-                    "code": "artifact_write_failed",
-                    "message": "Could not append cleanup evidence",
-                }
-            )
-        if owns_client:
-            client.close()
+    with deadlines.until("finalizing", finalization_end, "cleanup_and_total"):
+        return finalize_run(
+            bundle,
+            scenario,
+            findings,
+            diagnostics,
+            attempts,
+            applied,
+            complete,
+            interrupted,
+            cleanup,
+            deadlines,
+        )
+
+
+def finalize_run(
+    bundle,
+    scenario,
+    findings,
+    diagnostics,
+    attempts,
+    applied,
+    complete,
+    interrupted,
+    cleanup,
+    deadlines,
+):
+    try:
+        bundle.event("cleanup", cleanup)
+    except OSError:
+        diagnostics.append(
+            {
+                "severity": "error",
+                "code": "artifact_write_failed",
+                "message": "Could not append cleanup evidence",
+            }
+        )
     required = {fault.id for fault in scenario.faults if fault.required}
     coverage = {
         "required_total": len(required),
@@ -210,6 +339,7 @@ def run_one(scenario, variant, output, *, client=None, platform_info=None):
             }
         )
     report = {
+        "adapter": bundle.manifest.get("adapter"),
         "verdict": verdict(
             findings, diagnostics, complete and required <= applied and not interrupted
         ),
@@ -219,6 +349,13 @@ def run_one(scenario, variant, output, *, client=None, platform_info=None):
         "coverage": coverage,
         "attempts": attempts,
         "cleanup": cleanup,
+        "timing": {
+            "total_budget_ms": scenario.limits.total_ms,
+            "cleanup_budget_ms": scenario.limits.cleanup_ms,
+            "elapsed_before_report_ms": round((time.monotonic() - deadlines.started) * 1000),
+            # Finalization's elapsed duration is not known until this report is persisted.
+            "stages": [dict(stage) for stage in deadlines.stages if stage["stage"] != "finalizing"],
+        },
     }
     bundle.finalize(report)
     return bundle.path, report

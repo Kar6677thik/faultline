@@ -68,6 +68,7 @@ class Environment:
         self.containers = {}
         self.networks = {}
         self.worker_session = None
+        self.cleanup_remaining = []
         self.passwords = {
             f"FL_{role.upper()}_PASSWORD": secrets.token_urlsafe(32)
             for role in ("setup", "app", "observer")
@@ -130,7 +131,7 @@ class Environment:
         container.start()
         return container
 
-    def provision(self, variant):
+    def provision(self):
         for role in ("client", "storage"):
             network = self.client.networks.create(
                 f"fl-{self.bundle.run_id}-{role}",
@@ -166,7 +167,6 @@ class Environment:
             if time.monotonic() > deadline:
                 raise TimeoutError("PostgreSQL readiness deadline exceeded")
             time.sleep(0.2)
-        self.call("observer", "prepare", variant, timeout=10)
 
     def start_application(self, variant):
         self.create_container(
@@ -181,6 +181,8 @@ class Environment:
             "worker", ["client"], command=["python", "-c", "import time; time.sleep(900)"]
         )
         self.worker_session = WorkerSession(self.client.api, self.containers["worker"].id)
+
+    def wait_application_ready(self):
         deadline = time.monotonic() + 15
         while True:
             result = self.call(
@@ -243,13 +245,19 @@ class Environment:
 
     def cleanup(self):
         failures = []
-        if self.worker_session is not None:
-            self.worker_session.close()
         # Stop the application first; remove networks only after all containers are gone.
         resources = sorted(
             self.bundle.manifest["resources"],
             key=lambda r: (r["kind"] == "network", r["role"] != "application"),
         )
+        # Keep unresolved IDs visible even if a stage alarm interrupts a Docker call.
+        self.cleanup_remaining = list(resources)
+        if self.worker_session is not None:
+            try:
+                self.worker_session.close()
+            except Exception:
+                # Removing the worker below also terminates its remaining helper process.
+                pass
         for record in resources:
             try:
                 collection = (
@@ -264,7 +272,9 @@ class Environment:
                 else:
                     resource.remove()
             except NotFound:
-                continue
+                pass
             except Exception:
                 failures.append(record)
+                continue
+            self.cleanup_remaining.remove(record)
         return {"complete": not failures, "remaining_resources": failures}

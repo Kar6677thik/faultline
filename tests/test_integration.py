@@ -11,6 +11,7 @@ from types import SimpleNamespace
 
 import pytest
 
+from faultline.adapters import OrdersAdapter, bundled_adapter
 from faultline.artifacts import Bundle, read_bundle
 from faultline.engine import run_one
 from faultline.environment import Environment, client_and_preflight
@@ -56,7 +57,13 @@ def test_fresh_environment_matrix(
         assert report["cleanup"]["complete"]
         assert report["coverage"]["required_applied"] == report["coverage"]["required_total"]
         assert not report["diagnostics"]
-        assert read_bundle(path)[1]["verdict"] == expected
+        manifest, reread = read_bundle(path)
+        assert reread["verdict"] == expected
+        descriptor = json.loads((path / "adapter.json").read_text())
+        assert descriptor["description"]["external_registration"] is False
+        assert descriptor["description"]["invariants"] == dict.fromkeys(scenario.invariants, 1)
+        assert report["adapter"] == manifest["adapter"]
+        assert descriptor["identity"]["content_hash"] == report["adapter"]["content_hash"]
         snapshot = json.loads((path / "snapshots/final.json").read_text())
         assert len(snapshot["records"]["ledger"]) == debits
         assert snapshot["records"]["accounts"][0]["balance_minor"] == 1000000 - debits * 200000
@@ -77,8 +84,10 @@ def test_isolation_and_real_payload_conflict(tmp_path, scenario, docker_connecti
     bundle = Bundle(tmp_path, scenario, "correct")
     env = Environment(client, bundle, info["images"])
     try:
-        env.provision("correct")
+        env.provision()
+        bundled_adapter().prepare(env, "correct")
         env.start_application("correct")
+        bundled_adapter().readiness(env)
         for container in env.containers.values():
             container.reload()
             assert not container.attrs["HostConfig"]["PortBindings"]
@@ -119,6 +128,34 @@ def test_isolation_and_real_payload_conflict(tmp_path, scenario, docker_connecti
         assert env.cleanup()["complete"]
     assert before_containers <= {c.id for c in client.containers.list(all=True)}
     assert before_networks <= {n.id for n in client.networks.list()}
+
+
+def test_malformed_adapter_finding_cannot_pass_real_purchase(
+    monkeypatch, tmp_path, scenario, docker_connection
+):
+    client, info = docker_connection
+    original_verify = OrdersAdapter.verify
+
+    def forget_last_rule(self, *args, **kwargs):
+        return original_verify(self, *args, **kwargs)[:-1]
+
+    monkeypatch.setattr(OrdersAdapter, "verify", forget_last_rule)
+    path, report = run_one(scenario, "correct", tmp_path, client=client, platform_info=info)
+    assert report["verdict"] == "ERROR"
+    assert report["coverage"]["required_applied"] == 1
+    assert report["invariants"] == []
+    assert any(
+        d.get("hook") == "verify" and d["code"] == "adapter_contract_error"
+        for d in report["diagnostics"]
+    )
+    final = json.loads((path / "snapshots/final.json").read_text())
+    assert len(final["records"]["ledger"]) == 1
+    assert final["records"]["accounts"][0]["balance_minor"] == 800000
+    assert report["cleanup"]["complete"]
+    assert read_bundle(path)[1]["verdict"] == "ERROR"
+    filters = {"label": f"io.faultline.run={report['run_id']}"}
+    assert not client.containers.list(all=True, filters=filters)
+    assert not client.networks.list(filters=filters)
 
 
 def test_final_client_timeout_can_still_be_business_success(tmp_path, scenario, docker_connection):
@@ -199,5 +236,217 @@ def test_real_sigterm_cleans_only_the_child_run(tmp_path, docker_connection):
                 client,
                 SimpleNamespace(manifest=manifest, run_id=manifest["run_id"]),
                 info["images"],
+            )
+            assert env.cleanup()["complete"]
+
+
+def test_sigkill_recovery_preserves_other_runs_and_original_evidence(
+    tmp_path, scenario, docker_connection
+):
+    client, info = docker_connection
+    output = tmp_path / "interrupted"
+    # A second real environment outside the selected root must survive stale cleanup.
+    protected_bundle = Bundle(tmp_path / "protected", scenario, "correct")
+    protected = Environment(client, protected_bundle, info["images"])
+    raw = scenario.model_dump(by_alias=True)
+    raw["operations"][0]["timeout_ms"] = 10000
+    scenario_path = tmp_path / "slow-response.json"
+    scenario_path.write_text(json.dumps(raw))
+    child = None
+    manifest_path = None
+    command = [sys.executable, "-m", "faultline", "--output", str(output), "--format", "json"]
+    try:
+        protected.provision()
+        bundled_adapter().prepare(protected, "correct")
+        child = subprocess.Popen(
+            [*command, "run", str(scenario_path), "--variant", "correct"],
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+        )
+        deadline = time.monotonic() + 40
+        while time.monotonic() < deadline:
+            paths = list((output / "runs").glob("*/manifest.json"))
+            if paths:
+                manifest_path = paths[0]
+                history = manifest_path.parent / "history.ndjson"
+                if history.exists() and '"type":"fault_applied"' in history.read_text():
+                    break
+            assert child.poll() is None, "child exited before controlled interruption"
+            time.sleep(0.05)
+        else:
+            pytest.fail("child never reached response suppression")
+
+        live_cleanup = subprocess.run(
+            [*command, "clean", "--stale"], capture_output=True, text=True, timeout=10
+        )
+        assert live_cleanup.returncode == 2, (live_cleanup.stdout, live_cleanup.stderr)
+        assert "Another Faultline" in live_cleanup.stdout
+        assert child.poll() is None
+        child.kill()  # SIGKILL cannot run finally blocks or ordinary cleanup handlers.
+        child.communicate(timeout=10)
+        assert child.returncode == -signal.SIGKILL
+        manifest = json.loads(manifest_path.read_text())
+        filters = {"label": f"io.faultline.run={manifest['run_id']}"}
+        assert client.containers.list(all=True, filters=filters), "expected real leftovers"
+        original = {
+            path.relative_to(manifest_path.parent): path.read_bytes()
+            for path in manifest_path.parent.rglob("*")
+            if path.is_file()
+        }
+        assert "report.json" not in {str(path) for path in original}
+        for _ in range(2):  # Repeating scoped cleanup is safe after resources have disappeared.
+            cleanup = subprocess.run(
+                [*command, "clean", "--stale"], capture_output=True, text=True, timeout=30
+            )
+            assert cleanup.returncode == 0, (cleanup.stdout, cleanup.stderr)
+            result = json.loads(cleanup.stdout)
+            assert result["summary"]["complete"]
+            assert result["run_ids"] == [manifest["run_id"]]
+            receipt = json.loads(Path(result["artifact_paths"][0]).read_text())
+            assert receipt["complete"]
+            assert receipt["recorded_resources"] == manifest["resources"]
+        assert len(list((output / "cleanup").glob("*.json"))) == 2
+        assert not client.containers.list(all=True, filters=filters)
+        assert not client.networks.list(filters=filters)
+        assert original == {
+            path.relative_to(manifest_path.parent): path.read_bytes()
+            for path in manifest_path.parent.rglob("*")
+            if path.is_file()
+        }
+        incomplete = subprocess.run(
+            [*command, "report", manifest["run_id"]], capture_output=True, text=True, timeout=10
+        )
+        assert incomplete.returncode == 4  # Cleaning resources cannot invent a business verdict.
+        for resource in [*protected.containers.values(), *protected.networks.values()]:
+            protected.assert_owned(resource)
+        assert protected.snapshot("baseline")["complete"]
+    finally:
+        if child is not None and child.poll() is None:
+            child.kill()
+            child.communicate(timeout=10)
+        if manifest_path is not None:
+            manifest = json.loads(manifest_path.read_text())
+            env = Environment(
+                client, SimpleNamespace(manifest=manifest, run_id=manifest["run_id"]), {}
+            )
+            assert env.cleanup()["complete"]
+        assert protected.cleanup()["complete"]
+
+
+def test_observation_deadline_interrupts_real_helper_and_cleans(
+    monkeypatch, tmp_path, scenario, docker_connection
+):
+    client, info = docker_connection
+
+    class SlowObserver(Environment):
+        def snapshot(self, role):
+            if role == "final":
+                # A real exec stream waiting for a real child, not a mocked timeout return.
+                self.containers["observer"].exec_run(
+                    ["python", "-c", "import time; time.sleep(30)"]
+                )
+            return super().snapshot(role)
+
+    monkeypatch.setattr("faultline.engine.Environment", SlowObserver)
+    raw = scenario.model_dump(by_alias=True)
+    raw["limits"]["observation_ms"] = 1000
+    started = time.monotonic()
+    path, report = run_one(
+        Scenario.model_validate(raw), "correct", tmp_path, client=client, platform_info=info
+    )
+    assert time.monotonic() - started < 25  # The 30-second helper was actually interrupted.
+    assert report["verdict"] == "ERROR"
+    assert report["cleanup"]["complete"]
+    assert any(d.get("stage") == "observing" for d in report["diagnostics"])
+    assert not (path / "snapshots/final.json").exists()
+    assert read_bundle(path)[1]["verdict"] == "ERROR"
+    filters = {"label": f"io.faultline.run={report['run_id']}"}
+    assert not client.containers.list(all=True, filters=filters)
+    assert not client.networks.list(filters=filters)
+
+
+def test_drain_deadline_prevents_pass_with_a_still_running_application(
+    monkeypatch, tmp_path, scenario, docker_connection
+):
+    client, info = docker_connection
+
+    class SlowDrain(Environment):
+        def drain(self, timeout_ms):
+            time.sleep(30)
+            return super().drain(timeout_ms)
+
+    monkeypatch.setattr("faultline.engine.Environment", SlowDrain)
+    raw = scenario.model_dump(by_alias=True)
+    raw["limits"]["drain_ms"] = 1000
+    path, report = run_one(
+        Scenario.model_validate(raw), "correct", tmp_path, client=client, platform_info=info
+    )
+    assert report["verdict"] == "INCONCLUSIVE"
+    assert any(d.get("stage") == "draining" for d in report["diagnostics"])
+    assert any(f["status"] == "UNKNOWN" for f in report["invariants"])
+    final = json.loads((path / "snapshots/final.json").read_text())
+    assert len(final["records"]["ledger"]) == 1
+    assert not final["quiescent"]
+    assert report["cleanup"]["complete"]
+    filters = {"label": f"io.faultline.run={report['run_id']}"}
+    assert not client.containers.list(all=True, filters=filters)
+    assert not client.networks.list(filters=filters)
+
+
+def test_cleanup_deadline_preserves_real_leftovers_for_later_recovery(
+    monkeypatch, tmp_path, scenario, docker_connection
+):
+    client, info = docker_connection
+
+    class StalledCleanup(Environment):
+        def cleanup(self):
+            self.cleanup_remaining = list(self.bundle.manifest["resources"])
+            time.sleep(30)  # Simulate a stuck cleanup stage while real owned resources exist.
+            return super().cleanup()
+
+    monkeypatch.setattr("faultline.engine.Environment", StalledCleanup)
+    raw = scenario.model_dump(by_alias=True)
+    raw["limits"]["cleanup_ms"] = 2000
+    try:
+        path, report = run_one(
+            Scenario.model_validate(raw), "correct", tmp_path, client=client, platform_info=info
+        )
+        assert report["verdict"] == "ERROR"
+        assert all(f["status"] == "PASS" for f in report["invariants"])
+        assert not report["cleanup"]["complete"]
+        assert len(report["cleanup"]["remaining_resources"]) == 6
+        assert any(d.get("stage") == "cleanup" for d in report["diagnostics"])
+        filters = {"label": f"io.faultline.run={report['run_id']}"}
+        assert client.containers.list(all=True, filters=filters)
+        original_report = (path / "report.json").read_bytes()
+        recovered = subprocess.run(
+            [
+                sys.executable,
+                "-m",
+                "faultline",
+                "--output",
+                str(tmp_path),
+                "--format",
+                "json",
+                "clean",
+                "--run",
+                report["run_id"],
+            ],
+            capture_output=True,
+            text=True,
+            timeout=30,
+        )
+        assert recovered.returncode == 0, (recovered.stdout, recovered.stderr)
+        assert json.loads(recovered.stdout)["summary"]["complete"]
+        assert not client.containers.list(all=True, filters=filters)
+        assert not client.networks.list(filters=filters)
+        assert (path / "report.json").read_bytes() == original_report
+        assert read_bundle(path)[1]["verdict"] == "ERROR"
+    finally:
+        for manifest_path in (tmp_path / "runs").glob("*/manifest.json"):
+            manifest = json.loads(manifest_path.read_text())
+            env = Environment(
+                client, SimpleNamespace(manifest=manifest, run_id=manifest["run_id"]), {}
             )
             assert env.cleanup()["complete"]

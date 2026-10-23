@@ -103,9 +103,20 @@ class Fault(StrictModel):
 
 
 class Limits(StrictModel):
-    execution_ms: Annotated[int, Field(ge=1000, le=60000)] = 30000
-    drain_ms: Annotated[int, Field(ge=1000, le=10000)] = 10000
+    execution_ms: Annotated[int, Field(ge=1, le=300000)] = 60000
+    provisioning_ms: Annotated[int, Field(ge=1, le=300000)] = 60000
+    drain_ms: Annotated[int, Field(ge=1, le=300000)] = 10000
+    observation_ms: Annotated[int, Field(ge=1, le=300000)] = 10000
+    verification_ms: Annotated[int, Field(ge=1, le=300000)] = 10000
+    cleanup_ms: Annotated[int, Field(ge=1, le=300000)] = 30000
+    total_ms: Annotated[int, Field(ge=1, le=900000)] = 300000
     artifact_bytes: Annotated[int, Field(ge=65536, le=52428800)] = 52428800
+
+    @model_validator(mode="after")
+    def reserve_cleanup(self):
+        if self.total_ms <= self.cleanup_ms:
+            raise ValueError("total_ms must exceed cleanup_ms to leave time for experiment work")
+        return self
 
 
 class Scenario(StrictModel):

@@ -1,3 +1,4 @@
+import json
 from pathlib import Path
 
 from typer.testing import CliRunner
@@ -14,6 +15,10 @@ def test_validate_json_does_not_require_docker(monkeypatch):
     )
     assert result.exit_code == 0
     assert '"cli_schema_version": 1' in result.stdout
+    description = json.loads(result.stdout)["summary"]["adapter"]
+    assert description["adapter_id"] == "bundled_orders"
+    assert description["faults"] == ["response_suppress"]
+    assert description["external_registration"] is False
 
 
 def test_unsupported_scope_is_explicit_and_secrets_not_echoed(tmp_path):

@@ -2,7 +2,6 @@
 
 import json
 import signal
-from contextlib import contextmanager
 from pathlib import Path
 from typing import Annotated
 from uuid import UUID, uuid4
@@ -10,10 +9,13 @@ from uuid import UUID, uuid4
 import typer
 from pydantic import ValidationError
 
+from faultline.adapters import AdapterError, bundled_adapter
 from faultline.artifacts import atomic_json, read_bundle
 from faultline.engine import run_one
-from faultline.environment import Environment, client_and_preflight
+from faultline.environment import client_and_preflight
+from faultline.locking import ActiveRunError, execution_lock
 from faultline.models import EXIT_CODES, load_scenario
+from faultline.recovery import recover, recovery_manifests
 
 app = typer.Typer(
     no_args_is_help=True,
@@ -65,6 +67,8 @@ def finish(
 
 
 def input_error(ctx, command, exc, code=2):
+    if isinstance(exc, AdapterError):
+        finish(ctx, command, 4, {}, diagnostics=[exc.diagnostic()])
     message = str(exc)
     if isinstance(exc, ValidationError):
         message = "; ".join(
@@ -78,19 +82,6 @@ def input_error(ctx, command, exc, code=2):
         {},
         diagnostics=[{"code": "invalid_input" if code == 2 else "error", "message": message}],
     )
-
-
-@contextmanager
-def execution_lock(output):
-    import fcntl
-
-    output.mkdir(parents=True, exist_ok=True)
-    with (output / "execution.lock").open("a+") as lock:
-        try:
-            fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
-        except BlockingIOError as exc:
-            raise ValueError("Another Faultline operation owns this output directory") from exc
-        yield
 
 
 @app.command()
@@ -109,6 +100,8 @@ def validate(ctx: typer.Context, scenario: Path):
     """Validate the supported M1 scenario subset without starting Docker."""
     try:
         value = load_scenario(scenario)
+        adapter = bundled_adapter()
+        adapter.validate(value)
     except Exception as exc:
         input_error(ctx, "validate", exc)
     finish(
@@ -120,6 +113,7 @@ def validate(ctx: typer.Context, scenario: Path):
             "profile": "milestone1",
             "operations": 1,
             "faults": len(value.faults),
+            "adapter": adapter.description.model_dump(),
         },
     )
 
@@ -136,6 +130,7 @@ def run(
         if variant not in {"unsafe", "correct"}:
             raise ValueError("variant must be unsafe or correct")
         value = load_scenario(scenario)
+        bundled_adapter().validate(value, variant)
         client, info = client_and_preflight()
     except Exception as exc:
         input_error(ctx, "run", exc)
@@ -152,16 +147,17 @@ def run(
 
     previous = {sig: signal.signal(sig, interrupt) for sig in (signal.SIGINT, signal.SIGTERM)}
     try:
-        with execution_lock(ctx.obj["output"]):
-            for index in range(repeat):
-                typer.echo(f"Run {index + 1}/{repeat}: {value.id} ({variant})", err=True)
-                path, result = run_one(
-                    value, variant, ctx.obj["output"], client=client, platform_info=info
-                )
-                paths.append(path)
-                reports.append(result)
-                if result["lifecycle"] == "interrupted" or result["verdict"] == "ERROR":
-                    break
+        for index in range(repeat):
+            typer.echo(f"Run {index + 1}/{repeat}: {value.id} ({variant})", err=True)
+            path, result = run_one(
+                value, variant, ctx.obj["output"], client=client, platform_info=info
+            )
+            paths.append(path)
+            reports.append(result)
+            if result["lifecycle"] == "interrupted" or result["verdict"] == "ERROR":
+                break
+    except ActiveRunError as exc:
+        input_error(ctx, "run", exc)
     except (Exception, KeyboardInterrupt) as exc:
         input_error(ctx, "run", exc, 130 if isinstance(exc, KeyboardInterrupt) else 4)
     finally:
@@ -233,28 +229,44 @@ def report(ctx: typer.Context, bundle: str):
 
 
 @app.command()
-def clean(ctx: typer.Context, run: Annotated[str, typer.Option(help="UUID of a recorded run")]):
-    """Remove only owned leftovers for one run; preserve its evidence."""
+def clean(
+    ctx: typer.Context,
+    run: Annotated[str | None, typer.Option(help="UUID of a recorded run")] = None,
+    stale: Annotated[
+        bool, typer.Option(help="Recover non-live recorded runs in this output root")
+    ] = False,
+):
+    """Remove recorded owned leftovers; preserve experiments and save separate cleanup receipts."""
     try:
-        run_id = str(UUID(run))
-        path = ctx.obj["output"] / "runs" / run_id
-        manifest_path = path / "manifest.json"
-        if manifest_path.is_symlink() or manifest_path.stat().st_size > 1048576:
-            raise ValueError("unsafe manifest")
-        manifest = json.loads(manifest_path.read_text())
-        if manifest["run_id"] != run_id:
-            raise ValueError("run identity mismatch")
-        client, info = client_and_preflight(require_images=False)
-        try:
-            with execution_lock(ctx.obj["output"]):
-                from types import SimpleNamespace
-
-                env = Environment(
-                    client, SimpleNamespace(manifest=manifest, run_id=run_id), info["images"]
-                )
-                result = env.cleanup()
-        finally:
-            client.close()
+        if (run is None) == (not stale):
+            raise ValueError("Specify exactly one of --run RUN_ID or --stale")
+        run_id = str(UUID(run)) if run is not None else None
+        with execution_lock(ctx.obj["output"]):
+            manifests = recovery_manifests(ctx.obj["output"], run_id)
+            if manifests:
+                client, _info = client_and_preflight(require_images=False)
+                try:
+                    results, paths = recover(ctx.obj["output"], manifests, client)
+                except Exception as exc:
+                    input_error(ctx, "clean", exc, 4)
+                finally:
+                    client.close()
+            else:
+                results, paths = [], []
     except Exception as exc:
+        if isinstance(exc, typer.Exit):
+            raise
         input_error(ctx, "clean", exc)
-    finish(ctx, "clean", 0 if result["complete"] else 4, result)
+    complete = all(result["complete"] for result in results)
+    finish(
+        ctx,
+        "clean",
+        0 if complete else 4,
+        {
+            "complete": complete,
+            "runs_checked": len(results),
+            "remaining_resources": [r for result in results for r in result["remaining_resources"]],
+        },
+        paths=paths,
+        run_ids=[result["run_id"] for result in results],
+    )

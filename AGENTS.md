@@ -4,6 +4,8 @@ Read `README.md` and `docs/implementation-status.md` before changing behavior. T
 
 Apply `docs/engineering-principles.md`, derived from the user's Software Engineering Field Guide: simple modules, explicit contracts and dependencies, independent authoritative verification, bounded work, least privilege, and tests of real failure behavior. Introduce patterns or infrastructure only when a concrete requirement needs them.
 
+This is also a learning project. Maintain `docs/learning/` alongside implementation: explain concepts in plain language before technical details, map behavior to source and tests, and record each material design decision with its reason, alternatives, tradeoffs, and limits. Update the relevant walkthrough and decision entry when behavior changes. Explain why code exists, not just what its syntax does. Never describe planned features as working or invent measured results.
+
 - Use Python 3.12/3.13 and `uv.lock`; execute Docker experiments on Linux x86-64 or WSL2.
 - Keep verifier logic independent of the reference application's transaction implementation and variant name.
 - Never add arbitrary endpoint targeting or mutate resources without matching recorded ownership and labels.

@@ -39,6 +39,8 @@ class Bundle:
             "run_id": self.run_id,
             "engine_version": __version__,
             "implementation_profile": "milestone1",
+            # Recovery must acquire the original execution lock, not a copied bundle's lock.
+            "execution_root": str(output.resolve()),
             "created_at": utc_now(),
             "scenario_id": scenario.id,
             "variant": variant,
