@@ -26,6 +26,8 @@ The default execution budget used to be 30 seconds in the first implementation. 
 
 The total run budget begins **after validation/preflight and lock acquisition**, immediately before creating the bundle. Image builds/pulls, command parsing, preflight, and the entire repeat group are not included. Each repeated run receives its own budget. `clean --run` and `clean --stale` are separate recovery commands; their whole-command deadline remains deferred.
 
+Adapter resolution now has its own fixed ten-second allowance before Docker and locking. It covers discovery, provenance, imports, construction, description, and validation, for bundled and installed adapters. Expiry produces `adapter_preflight_timeout` and exit 4 without creating a run bundle. This separate allowance does not bound the whole preflight command or repeat group. See the [installed-adapter guide](installed-adapters.md).
+
 Internal request, helper, readiness, and database timeouts still exist. Stage limits are ceilings, not a promise that a helper will wait that long. For example, a ten-second helper timeout can fail before a longer provisioning deadline.
 
 ## Work through the arithmetic

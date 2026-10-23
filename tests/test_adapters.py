@@ -34,7 +34,7 @@ def test_capability_mismatch_refuses_before_docker_or_output(monkeypatch, scenar
     [
         {"boundary_version": True},
         {"boundary_version": 2},
-        {"external_registration": True},
+        {"external_registration": "true"},
         {"unexpected": True},
         {"concurrency": "1"},
     ],
@@ -219,7 +219,9 @@ def test_hook_failure_is_reported_with_cleanup_and_identity(
         )
     else:
         setattr(implementation, broken_hook, Mock(return_value="broken-contract"))
-    monkeypatch.setattr("faultline.engine.bundled_adapter", lambda: CheckedAdapter(implementation))
+    monkeypatch.setattr(
+        "faultline.adapter_loader.bundled_adapter", lambda: CheckedAdapter(implementation)
+    )
     # No deliberate timeout needed in these harness failure checks.
     raw = scenario.model_dump(by_alias=True)
     raw["faults"] = []

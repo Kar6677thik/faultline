@@ -1,4 +1,4 @@
-"""Checked internal adapter boundary; external registration is not supported yet.
+"""Checked order-profile bridge, narrower than the full public v1 adapter contract.
 
 The bridge deliberately describes the existing synchronous order profile, not the
 full public v1 API. Docker ownership and deadlines remain the engine's responsibility.
@@ -46,7 +46,7 @@ class Description(StrictModel):
     concurrency: Annotated[int, Field(ge=1)]
     authority: Literal["postgresql"]
     quiescence: Literal["graceful_process_exit_and_database_sessions"]
-    external_registration: Literal[False]
+    external_registration: bool
 
 
 class Failure(StrictModel):
@@ -195,9 +195,14 @@ class CheckedAdapter:
 
     def __init__(self, implementation):
         self.implementation = implementation
-        self.description = self._call("describe", lambda value: Description.model_validate(value))
+        self.description = self._call(
+            "describe", lambda value: Description.model_validate(detached_json(value))
+        )
         if self.description.boundary_version != 1:
             raise AdapterError("describe", "adapter_contract_error", "Unsupported adapter boundary")
+        for hook in ("validate", "prepare", "readiness", "quiesce", "snapshot", "verify"):
+            if not callable(getattr(implementation, hook, None)):
+                raise AdapterError(hook, "adapter_contract_error", "Adapter is missing a hook")
 
     def _call(self, hook, check, *args, **kwargs):
         try:
@@ -297,5 +302,5 @@ class CheckedAdapter:
 
 
 def bundled_adapter():
-    """Internal composition point, deliberately not an external adapter loader."""
+    """Reserved built-in factory; installed selection lives in adapter_loader."""
     return CheckedAdapter(OrdersAdapter())

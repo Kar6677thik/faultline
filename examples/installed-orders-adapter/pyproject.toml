@@ -1,0 +1,17 @@
+[build-system]
+requires = ["hatchling>=1.27,<2"]
+build-backend = "hatchling.build"
+
+[project]
+name = "faultline-example-orders"
+version = "0.1.0"
+description = "Packaged example for Faultline's restricted order-adapter bridge"
+requires-python = ">=3.12,<3.14"
+dependencies = ["faultline==0.1.0"]
+
+[project.entry-points."faultline.adapters"]
+example_orders = "faultline_example_orders:ExampleOrdersAdapter"
+incomplete_orders = "faultline_example_orders:IncompleteOrdersAdapter"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/faultline_example_orders"]

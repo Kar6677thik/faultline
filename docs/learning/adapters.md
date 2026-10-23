@@ -4,7 +4,7 @@ Imagine Faultline as a laboratory supervisor. The supervisor knows how to book t
 
 The **engine** is the supervisor. The **adapter** is that assistant. For our shop experiment, the assistant understands orders, wallet debits, stock, and confirmation records. A future bank-transfer assistant will understand accounts and equal debit/credit pairs instead.
 
-This guide covers the **checked internal adapter boundary** for the existing order experiment. It does not yet let you install another adapter or introduce another business domain. The later [project configuration increment](projects.md) permits selecting a local application image that conforms to the same order contract. The [public release contract](../../specs/04-adapters.md) remains the destination; the current bridge is deliberately narrower.
+This guide covers the **checked order-adapter boundary** for the existing experiment. Projects can now select a separately [installed adapter package](installed-adapters.md), or a local application image that conforms to the same order contract. Additional business domains remain unsupported. The [public release contract](../../specs/04-adapters.md) remains the destination; the current bridge is deliberately narrower.
 
 ## Why this change matters now
 
@@ -28,7 +28,7 @@ There is a second reason to introduce a boundary: the assistant can make a mista
 
 Readiness is not fixture validation. An HTTP health endpoint can respond successfully even when the starting balance is wrong. Likewise, graceful process exit alone is not our complete quiescence proof: final observation must also show zero application database sessions. The engine combines both facts before allowing the final state to be treated as settled.
 
-Provisioning, preparation, and readiness share the provisioning budget. Quiescence uses the drain budget; final snapshots use observation; verification and validation of its returned findings use verification. Cleanup still runs when a hook fails. The built-in description and input validation run before the timed experiment, like existing scenario parsing; arbitrary installed hooks are not supported by this arrangement.
+Provisioning, preparation, and readiness share the provisioning budget. Quiescence uses the drain budget; final snapshots use observation; verification and validation of its returned findings use verification. Cleanup still runs when a hook fails. Selection, identity measurement, import, construction, description, and input validation run under a separate fixed ten-second preflight allowance before Docker and run timing. This applies to both built-in and installed adapters.
 
 ## Checking the assistant's work
 
@@ -57,7 +57,7 @@ These checks prevent malformed results from being accepted. They cannot prove th
 
 The new `adapter.json` artifact records the capability description and source identity. The manifest and JSON report contain a compact reference to it, and the history includes an `adapter_selected` event before provisioning resources.
 
-An identity contains the package name/version, individual Python-source SHA-256 hashes, and a hash of that sorted source inventory. The bundled adapter shares a package with the engine and verifier, so the inventory covers the package's Python files rather than guessing which imports might affect correctness. At most 128 Python files, one MiB per file, and four MiB total are accepted.
+The bundled identity contains the package name/version, individual Python-source SHA-256 hashes, and a hash of that sorted source inventory. The bundled adapter shares a package with the engine and verifier, so the inventory covers the package's Python files rather than guessing which imports might affect correctness. At most 128 Python files, one MiB per file, and four MiB total are accepted. Installed adapters additionally fingerprint their actual distribution files and factory address together with this engine identity; see [installed provenance](installed-adapters.md#why-the-tool-writes-down-file-fingerprints).
 
 ELI5: write down which edition of the instruction book the assistant used. If you change a page, the book's fingerprint changes.
 
@@ -81,8 +81,8 @@ After rebuilding the runtime and running the README demo, open the run's `adapte
 
 For a learning exercise, inspect `test_invalid_verifier_output_is_never_a_business_verdict` in [test_adapters.py](../../tests/test_adapters.py). Predict what happens when a verifier returns six PASS results. Then read `test_malformed_adapter_finding_cannot_pass_real_purchase` in [test_integration.py](../../tests/test_integration.py): it performs a real committed purchase, deliberately drops one result, and checks ERROR plus complete cleanup. A sound application and a broken judge are different outcomes.
 
-## What remains before external adapters
+## What remains before the full public adapter API
 
-The scenario parser still has order-specific types; the HTTP scheduler still sends the one bundled order request; the environment still uses the fixed dependency images and topology. The [project increment](projects.md) adds a runnable restricted manifest, local application image selection, and resource/budget settings. It does not load external adapter packages. The internal `boundary_version: 1` is not a claim of compliance with the full public adapter API version 1. The current boolean quiescence result is narrower than the planned structured ready/pending/unknown protocol.
+The scenario parser still has order-specific types; the HTTP scheduler still sends the one bundled order request; the environment still uses fixed dependency images and topology. The [project increment](projects.md) adds a restricted manifest, local application images, and resource/budget settings. The [installed-adapter increment](installed-adapters.md) adds package selection, provenance, and a separately built wheel integration test. `boundary_version: 1` is not a claim of compliance with the full public adapter API version 1. The current boolean quiescence result is narrower than the planned structured ready/pending/unknown protocol.
 
-External registration still needs a generalized project manifest, pinned installed-package identity, capability negotiation across routes and services, explicit lifecycle contracts, and a separately packaged integration test. The internal boundary and restricted projects create tested places to introduce that work without changing the current experiment's semantics.
+A generalized project manifest, capability negotiation across routes/services, broader lifecycle contracts, and independent external-domain onboarding remain outstanding. The packaged example reuses the order hooks and verifier; it does not establish an independent implementation. These boundaries create tested places to introduce that work without changing the current experiment's semantics.

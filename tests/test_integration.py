@@ -2,6 +2,7 @@
 
 import json
 import os
+import shutil
 import signal
 import subprocess
 import sys
@@ -33,6 +34,115 @@ def docker_connection():
     client, info = client_and_preflight()
     yield client, info
     client.close()
+
+
+@pytest.fixture(scope="module")
+def installed_adapter_site(tmp_path_factory):
+    """Build a separate wheel and install it without altering Faultline's environment."""
+    uv = os.environ.get("UV") or shutil.which("uv")
+    assert uv, "Run integration through uv run (or put uv on PATH) to build the example wheel"
+    root = tmp_path_factory.mktemp("packaged-adapter")
+    built = subprocess.run(
+        [uv, "build", "--wheel", str(ROOT / "examples/installed-orders-adapter"), "-o", str(root)],
+        capture_output=True,
+        text=True,
+        timeout=90,
+    )
+    assert built.returncode == 0, (built.stdout, built.stderr)
+    wheels = list(root.glob("*.whl"))
+    assert len(wheels) == 1
+    site = root / "site"
+    installed = subprocess.run(
+        [uv, "pip", "install", "--no-deps", "--offline", "--target", str(site), str(wheels[0])],
+        capture_output=True,
+        text=True,
+        timeout=30,
+    )
+    assert installed.returncode == 0, (installed.stdout, installed.stderr)
+    return site
+
+
+@pytest.mark.parametrize(
+    ("entry_point", "variant", "expected", "debits"),
+    [
+        ("example_orders", "unsafe", "FAIL", 2),
+        ("example_orders", "correct", "PASS", 1),
+        ("incomplete_orders", "correct", "ERROR", 1),
+    ],
+)
+def test_installed_wheel_runs_and_offline_tools_survive_its_absence(
+    tmp_path, docker_connection, installed_adapter_site, entry_point, variant, expected, debits
+):
+    client, _info = docker_connection
+    raw = load_document(ROOT / "examples/orders/faultline.project.yaml")
+    raw["adapter"]["entry_point"] = entry_point
+    raw["scenario_paths"] = ["lost-response.yaml"]
+    project = tmp_path / "faultline.project.yaml"
+    project.write_text(json.dumps(raw))
+    shutil.copyfile(ROOT / "examples/orders/lost-response.yaml", tmp_path / "lost-response.yaml")
+    output = tmp_path / "output"
+    command = [sys.executable, "-m", "faultline", "--output", str(output), "--format", "json"]
+    environment = dict(os.environ, PYTHONPATH=str(installed_adapter_site))
+    result = subprocess.run(
+        [*command, "--project", str(project), "run", "lost-response.yaml", "--variant", variant],
+        capture_output=True,
+        text=True,
+        env=environment,
+        timeout=120,
+    )
+    assert result.returncode == {"PASS": 0, "FAIL": 1, "ERROR": 4}[expected], (
+        result.stdout,
+        result.stderr,
+    )
+    envelope = json.loads(result.stdout)
+    assert envelope["summary"]["verdict"] == expected
+    path = Path(envelope["artifact_paths"][0])
+    manifest, report = read_bundle(path)
+    assert report["cleanup"]["complete"]
+    assert report["coverage"]["required_applied"] == 1
+    assert manifest["adapter"]["adapter_id"] == entry_point
+    assert manifest["adapter"]["package"] == "faultline-example-orders"
+    identity = json.loads((path / "adapter.json").read_text())["identity"]
+    assert identity["entry_point"] == entry_point
+    assert identity["content_hash"] == report["adapter"]["content_hash"]
+    assert "faultline_example_orders/__init__.py" in identity["files"]
+    final = json.loads((path / "snapshots/final.json").read_text())
+    assert len(final["records"]["ledger"]) == debits
+    assert final["records"]["accounts"][0]["balance_minor"] == 1000000 - 200000 * debits
+    if expected == "ERROR":
+        assert not report["invariants"]
+        assert any(
+            d.get("code") == "adapter_contract_error" and d.get("hook") == "verify"
+            for d in report["diagnostics"]
+        )
+    else:
+        assert not report["diagnostics"]
+    # No plugin PYTHONPATH and no project file: offline inspection and recovery must
+    # still work, even for the malformed-verifier run. Evidence remains byte-for-byte.
+    project.unlink()
+    original = (path / "report.json").read_bytes()
+    offline_environment = {key: value for key, value in os.environ.items() if key != "PYTHONPATH"}
+    offline = subprocess.run(
+        [*command, "report", report["run_id"]],
+        env=offline_environment,
+        capture_output=True,
+        text=True,
+        timeout=15,
+    )
+    assert offline.returncode == result.returncode, (offline.stdout, offline.stderr)
+    cleaned = subprocess.run(
+        [*command, "clean", "--run", report["run_id"]],
+        env=offline_environment,
+        capture_output=True,
+        text=True,
+        timeout=30,
+    )
+    assert cleaned.returncode == 0, (cleaned.stdout, cleaned.stderr)
+    assert (path / "report.json").read_bytes() == original
+    filters = {"label": f"io.faultline.run={report['run_id']}"}
+    assert not client.containers.list(all=True, filters=filters)
+    assert not client.networks.list(filters=filters)
+    print(f"installed {entry_point}/{variant}: {expected}, debits={debits}, {path}", flush=True)
 
 
 @pytest.mark.parametrize(

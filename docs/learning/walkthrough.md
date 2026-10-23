@@ -5,7 +5,7 @@
 Open [lost-response.yaml](../../examples/orders/lost-response.yaml). YAML is a readable way to write structured settings. This file is the experiment recipe, not Python code.
 
 - `schema_version` identifies the settings format.
-- `id` names the scenario; `adapter_profile` selects the order rules and `fixture` selects the starting data. These are currently fixed built-in choices, not a public plugin system.
+- `id` names the scenario; `adapter_profile` selects the order rules and `fixture` selects the starting data. These remain fixed order-profile choices even when a project selects an installed adapter.
 - `seed` is saved for reproducible input descriptions. This milestone has an explicit operation and no random generator, so changing the seed does not generate a different schedule.
 - `concurrency: 1` means one attempt at a time. General concurrent workloads are not supported yet.
 - `operations` describes one logical purchase. Its `id` is the scenario's local label; `logical_id` equals the business `purchase_id`.
@@ -19,7 +19,7 @@ Open [lost-response.yaml](../../examples/orders/lost-response.yaml). YAML is a r
 
 `faultline validate` performs these checks without Docker. Catching an invalid recipe before building the laboratory saves time and prevents ambiguous experiments.
 
-[adapters.py](../../src/faultline/adapters.py) also checks whether the built-in adapter supports the recipe and exposes its capabilities in validation output. The engine now calls this checked internal boundary for domain work. Think of the engine as the lab supervisor and the adapter as the assistant who understands the shop. Read the [adapter guide](adapters.md) for the hooks, contract checks, and limits; external adapter installation remains unsupported.
+[adapter_loader.py](../../src/faultline/adapter_loader.py) selects the built-in or explicitly installed adapter under a separate ten-second preflight allowance. [adapters.py](../../src/faultline/adapters.py) checks whether it supports the recipe and exposes its capabilities in validation output. The engine calls this checked boundary for domain work. Think of the engine as the lab supervisor and the adapter as the assistant who understands the shop. Read the [adapter guide](adapters.md) for hooks and result checks, and the [installed-adapter guide](installed-adapters.md) for package selection, provenance, and its trust boundary. Loading a package does not introduce another business domain.
 
 Optionally select the [example project](../../examples/orders/faultline.project.yaml) with global `--project`. [projects.py](../../src/faultline/projects.py) validates the lab's service settings, constrains scenario files to its directory, and merges budget ceilings before adapter validation. The [project guide](projects.md) explains why an omitted default can be clipped while an explicit over-ceiling request is rejected. With a project, scenario paths are project-relative; artifact output remains relative to the current directory.
 
@@ -142,7 +142,7 @@ A definite business violation can remain FAIL even if the requested fault was no
 
 [artifacts.py](../../src/faultline/artifacts.py) writes the plan, manifest, event history, snapshots, and reports. JSON stores structured objects; NDJSON stores one JSON event per line. Sequence numbers expose missing or reordered history entries. Hashes detect file changes relative to the recorded inventory; they are not digital signatures and do not prove who created an artifact.
 
-New runs also save `adapter.json`: capabilities, package version, and the source-file inventory fingerprint. Project-backed runs save `project.json` and its configuration hash. The manifest and report reference these identities. This helps identify the judge and laboratory used; it does not implement historical replay or prove host/container source equivalence. Cleanup uses the project label saved before resource creation and does not reload current YAML.
+New runs also save `adapter.json`: capabilities, package version, and the source-file inventory fingerprint. Installed adapters additionally record their distribution file inventory and factory address, combined with Faultline's source hash. Project-backed runs save `project.json` and its configuration hash. The manifest and report reference these identities. This helps identify the judge and laboratory used; it does not implement historical replay or prove host/container source equivalence. Cleanup uses the project label saved before resource creation and does not reload current YAML or resolve adapters.
 
 Writes use a temporary file and replacement for complete JSON documents. History events are appended and flushed to disk. These choices reduce partial-write ambiguity; they do not promise recovery from every disk failure or power loss.
 
@@ -155,6 +155,7 @@ Cleanup removes recorded containers before their networks and verifies ownership
 - [test_worker.py](../../tests/test_worker.py) checks message framing, truncated streams, frame-size limits, and socket cleanup.
 - [test_verifier.py](../../tests/test_verifier.py) uses hand-built records to check the judge independently of the application's transaction code.
 - [test_adapters.py](../../tests/test_adapters.py) checks the judge's result contract, malformed snapshots, capability refusal before Docker, hook errors, and source provenance.
+- [test_adapter_loader.py](../../tests/test_adapter_loader.py) checks real installed metadata/imports, ambiguous registrations, wrong versions, missing/unsafe files, import-path mismatch, bounded hooks, and cancellation. The Docker suite separately builds and installs an actual wheel.
 - [test_projects.py](../../tests/test_projects.py) checks strict manifests, confined paths, ceiling/default merging, local image selection, host budgets, and recorded project ownership.
 - [test_artifacts.py](../../tests/test_artifacts.py) checks evidence integrity and incomplete/corrupt bundles.
 - [test_environment.py](../../tests/test_environment.py) checks ownership and failure-path cleanup.

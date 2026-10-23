@@ -1,6 +1,10 @@
 # Faultline glossary in plain language
 
-**Adapter:** a translator between the test engine and an application's business rules. It says how to prepare data, stop writes, read state, and judge results. A checked internal order adapter now exists; external registration and the complete public API remain planned. See the [adapter guide](adapters.md).
+**Adapter:** a translator between the test engine and an application's business rules. It says how to prepare data, stop writes, read state, and judge results. A checked order bridge supports the built-in or a separately installed trusted package; the complete public API remains planned. See the [adapter guide](adapters.md).
+
+**Entry point:** an installed package's address card mapping a short name to a Python factory. Faultline looks up the selected name without importing unselected adapter modules. See the [installation guide](installed-adapters.md).
+
+**Wheel and RECORD:** a wheel is an installable Python package archive. Its RECORD is the file list used to inspect the installed package. Faultline hashes actual bytes and refuses missing measured files rather than trusting that list's declared hashes.
 
 **Capability:** an explicit declaration of what an adapter can handle, such as an operation, fault, fixture, or invariant version. Unsupported requests are refused before provisioning.
 

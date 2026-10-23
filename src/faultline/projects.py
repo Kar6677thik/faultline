@@ -1,4 +1,4 @@
-"""Runnable project subset for the bundled order profile; no external plugin imports."""
+"""Runnable order-project subset; parsing never imports an adapter."""
 
 from dataclasses import dataclass
 from pathlib import Path, PurePosixPath
@@ -22,13 +22,15 @@ StageCeiling = Annotated[int, Field(ge=1, le=300000)]
 
 
 class AdapterSelection(StrictModel):
-    entry_point: Literal["bundled_orders"]
+    entry_point: Identifier
     contract_version: Annotated[int, Field(ge=1, le=1)]
-    package_version: str
+    package_version: Annotated[
+        str, Field(min_length=1, max_length=128, pattern=r"^[A-Za-z0-9.!+_-]+$")
+    ]
 
     @model_validator(mode="after")
     def installed_version(self):
-        if self.package_version != __version__:
+        if self.entry_point == "bundled_orders" and self.package_version != __version__:
             raise ValueError("adapter package_version must exactly match the installed Faultline")
         return self
 

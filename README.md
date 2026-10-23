@@ -37,7 +37,7 @@ The fault receives a genuine complete successful response, records its evidence,
 Each run prints its UUID and writes a bundle to `.faultline/runs/<uuid>/`:
 
 - `plan.json` and `manifest.json`: effective scenario, versions, resolved image IDs, ownership records.
-- `adapter.json`: built-in capabilities, package version, and Python-source inventory fingerprint for the adapter and its shared package.
+- `adapter.json`: selected capabilities, package version, and content fingerprint. Installed adapters also record their factory, installed-file hashes, and shared engine source identity.
 - `project.json` for project-backed runs: validated project settings and their configuration identity.
 - `history.ndjson`: durable attempt, response witness, fault, client outcome, and lifecycle events.
 - `snapshots/baseline.json` and `snapshots/final.json`: independently read business rows.
@@ -59,7 +59,7 @@ Recovery must use the original output root recorded in the manifest. Copied/move
 
 Run/report exit codes: **0 PASS**, **1 FAIL**, **2 invalid input/preflight**, **3 INCONCLUSIVE**, **4 ERROR**, **130 interrupted**. Missing fault coverage cannot produce PASS. Cleanup failures produce ERROR while retaining available findings. Validation rejects features not implemented in this milestone.
 
-The engine now uses a checked internal adapter boundary. `faultline --format json validate examples/orders/control.yaml` shows its supported capabilities without Docker. Incomplete or malformed grading results produce ERROR, even if the returned subset says PASS. Only the bundled order adapter is supported; external registration remains planned. See the [ELI5 adapter guide](docs/learning/adapters.md).
+The engine uses a checked order-adapter boundary. `faultline --format json validate examples/orders/control.yaml` shows its supported capabilities without Docker. Incomplete or malformed grading results produce ERROR, even if the returned subset says PASS. Projects can select the built-in adapter or a separately installed trusted Python package through the `faultline.adapters` entry-point group. Exact package versions, unambiguous registrations, bounded file provenance, and a ten-second adapter preflight are checked before Docker. See the [ELI5 adapter guide](docs/learning/adapters.md) and [installation tutorial](docs/learning/installed-adapters.md).
 
 ## Configure a project
 
@@ -75,9 +75,9 @@ With a project, the scenario path is relative to the project file's directory an
 
 Project limits cap scenario budgets. Omitted scenario defaults are clipped to those ceilings; explicit over-ceiling requests are rejected. JSON validation shows effective limits and the plan/configuration hashes. Docker enforces declared memory, CPU, and PID limits. Preflight resolves selected local application images to immutable IDs and checks architecture/host capacity without pulling images.
 
-This is a restricted order-profile manifest, not the complete v1 project/adapter API. The helper/database images, role bindings, route, permissions, and readiness methods remain constrained. External adapters, proxy topology, custom environment mappings, extra writable paths, and readiness overrides are rejected. A custom local application image must conform to the existing order fixture. Read the [ELI5 project guide](docs/learning/projects.md) for exact settings, image requirements, path rules, and examples.
+This is a restricted order-profile manifest, not the complete v1 project/adapter API. The helper/database images, role bindings, route, permissions, and readiness methods remain constrained. Installed adapters must implement this same bridge; proxy topology, additional domains, custom environment mappings, extra writable paths, and readiness overrides remain unsupported. A custom local application image must conform to the existing order fixture. Read the [ELI5 project guide](docs/learning/projects.md) for exact settings, image requirements, path rules, and examples.
 
-Offline reporting and scoped cleanup use recorded evidence and ownership, not current project YAML. They remain usable when the project file changes or disappears.
+Offline reporting and scoped cleanup use recorded evidence and ownership without loading project YAML or adapters. They remain usable when the project file changes or the adapter package is uninstalled. The [separate example package](examples/installed-orders-adapter/pyproject.toml) demonstrates this bridge using the existing order hooks; it is not an independent verifier or application.
 
 ## Time budgets
 
@@ -100,7 +100,7 @@ The Linux/WSL coordinator runs on the main Python thread and refuses to take ove
 
 ## Verification
 
-See the [project acceptance results](docs/project-acceptance-results.md) for the latest validation, and the earlier [initial](docs/acceptance-results.md), [recovery](docs/recovery-acceptance-results.md), [deadline](docs/deadline-acceptance-results.md), and [adapter](docs/adapter-acceptance-results.md) results for their measured phases and retained evidence.
+See the [installed-adapter acceptance results](docs/installed-adapter-acceptance-results.md) for the latest validation, and the earlier [initial](docs/acceptance-results.md), [recovery](docs/recovery-acceptance-results.md), [deadline](docs/deadline-acceptance-results.md), [adapter](docs/adapter-acceptance-results.md), and [project](docs/project-acceptance-results.md) results for their measured phases and retained evidence.
 
 ```bash
 uv run ruff check src tests
@@ -109,7 +109,7 @@ uv run pytest -q
 FAULTLINE_INTEGRATION=1 uv run pytest -q tests/test_integration.py
 ```
 
-The ordinary test command skips Docker integration explicitly. To execute the specification's twenty fresh runs for each of four scenario/variant pairs, plus real isolation, read-only-observer, payload-conflict, final-timeout, missed-fault, signal/recovery, and stage-deadline checks:
+The ordinary test command skips Docker integration explicitly. The integration suite also uses `uv` to build a separate example wheel and installs it into a temporary directory without dependencies; first build may fetch build tooling. To execute the specification's twenty fresh runs for each of four scenario/variant pairs, plus real isolation, read-only-observer, payload-conflict, final-timeout, missed-fault, signal/recovery, stage-deadline, and installed-adapter checks:
 
 ```bash
 FAULTLINE_INTEGRATION=1 FAULTLINE_ACCEPTANCE_REPEATS=20 \

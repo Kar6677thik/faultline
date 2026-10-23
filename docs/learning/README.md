@@ -14,8 +14,9 @@ This guide describes the code currently implemented. The [release specifications
 4. [Learn time budgets](deadlines.md): request timeouts, stage deadlines, reserved cleanup time, and what happens when work runs late.
 5. [Understand adapters](adapters.md): separate the supervisor from the domain assistant, check the judge's outputs, and identify its source.
 6. [Configure a project](projects.md): separate a recipe from its laboratory, constrain paths and budgets, and pin local images.
-7. [Look up unfamiliar words](glossary.md): short explanations with Faultline examples.
-8. [Run the README demo](../../README.md#demonstrate-the-defect-and-correction), then compare its evidence with [measured results](../acceptance-results.md).
+7. [Install an adapter](installed-adapters.md): package address cards, version checks, content fingerprints, preflight deadlines, and the remaining public API gap.
+8. [Look up unfamiliar words](glossary.md): short explanations with Faultline examples.
+9. [Run the README demo](../../README.md#demonstrate-the-defect-and-correction), then compare its evidence with [measured results](../acceptance-results.md).
 
 ## How to read the evidence
 

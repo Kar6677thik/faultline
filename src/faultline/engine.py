@@ -3,7 +3,8 @@
 import json
 import time
 
-from faultline.adapters import AdapterError, bundled_adapter, source_identity
+from faultline.adapter_loader import resolve_adapter
+from faultline.adapters import AdapterError
 from faultline.artifacts import Bundle
 from faultline.deadlines import DeadlineExceeded, RunDeadlines, check_alarm_available
 from faultline.environment import Environment, client_and_preflight
@@ -119,8 +120,7 @@ def run_one(scenario, variant, output, *, client=None, platform_info=None, proje
         project = Project.model_validate(project.configuration())
         variant = project.select_variant(variant)
         scenario = project.scenario(scenario.model_dump(by_alias=True, exclude_unset=True))
-    adapter = bundled_adapter()
-    adapter.validate(scenario, variant)
+    adapter, identity = resolve_adapter(project, scenario, variant)
     check_alarm_available()
     with execution_lock(output):
         owns_client = client is None
@@ -139,6 +139,7 @@ def run_one(scenario, variant, output, *, client=None, platform_info=None, proje
                 variant,
                 output,
                 adapter=adapter,
+                adapter_identity=identity,
                 client=client,
                 platform_info=platform_info,
                 project=project,
@@ -151,7 +152,17 @@ def run_one(scenario, variant, output, *, client=None, platform_info=None, proje
                 client.close()
 
 
-def _run_one(scenario, variant, output, *, adapter, client=None, platform_info=None, project=None):
+def _run_one(
+    scenario,
+    variant,
+    output,
+    *,
+    adapter,
+    adapter_identity,
+    client=None,
+    platform_info=None,
+    project=None,
+):
     limits = scenario.limits
     deadlines = RunDeadlines(limits)
     with deadlines.stage("initializing", limits.provisioning_ms, started=deadlines.started):
@@ -167,7 +178,7 @@ def _run_one(scenario, variant, output, *, adapter, client=None, platform_info=N
     try:
         with deadlines.stage("provisioning", limits.provisioning_ms, started=deadlines.started):
             bundle.stage("provisioning")
-            identity = source_identity()
+            identity = adapter_identity
             bundle.write(
                 "adapter.json",
                 {

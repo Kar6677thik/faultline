@@ -4,7 +4,7 @@ A **scenario** is an experiment recipe: make this purchase, hide this response, 
 
 ELI5: the scenario says what to cook. The project says which kitchen to use and how much time and electricity you can spend.
 
-Faultline now runs a strict project-manifest subset for the existing order profile. Start with [the executable example](../../examples/orders/faultline.project.yaml). This is not the complete five-service public v1 project contract: proxy services, external adapter packages, flexible routing, and additional domains remain unsupported.
+Faultline now runs a strict project-manifest subset for the existing order profile. Start with [the executable example](../../examples/orders/faultline.project.yaml). This is not the complete five-service public v1 project contract: proxy services, flexible routing, and additional domains remain unsupported. Separately installed order adapters are supported through the [installed-adapter bridge](installed-adapters.md).
 
 ## Run the example
 
@@ -31,14 +31,14 @@ Without `--project`, validation, execution, and doctor check for `faultline.proj
 | --- | --- |
 | `schema_version` | Integer 1; this implementation accepts a restricted subset of that schema |
 | `project_id` | A short stable name used in evidence and Docker ownership labels |
-| `adapter` | Reserved built-in name `bundled_orders`, contract version 1, and the exact installed Faultline package version |
+| `adapter` | Reserved built-in `bundled_orders` or an installed `faultline.adapters` entry-point name, bridge contract version 1, and the exact selected distribution version |
 | `services` | Exactly `application`, `database`, `worker`, and `observer`, with the fixed role/port/readiness bindings below |
 | `routes` | Exactly `orders_api`, application service, internal port 8000, base path `/` |
 | `variants` | One or both of `unsafe` and `correct`, explicitly declared, each selecting an application image |
 | `scenario_paths` | Optional list of up to 100 distinct project-relative files for discovery/documentation; does not execute them |
 | `limits` | Optional local ceilings for run budgets and supported workload counts |
 
-Although the selection field is called `entry_point` to follow the target shape, this increment uses a reserved built-in lookup. It does not import arbitrary installed entry points. `external_registration: false` remains visible in the adapter description. General variant names and the full specification's omitted-variants/default-variant behavior are not implemented; this profile requires explicit known variants.
+YAML parsing does not import adapters. Validate/run/doctor subsequently resolve the selected name, check its installed version and capabilities, and measure its files before Docker preflight. `external_registration` is false for the reserved built-in and true for installed adapters. See the [installed-adapter guide](installed-adapters.md) for package and deadline constraints. General variant names and the full specification's omitted-variants/default-variant behavior are not implemented; this profile requires explicit known variants.
 
 If a project declares one variant, `run` may omit `--variant`. If it declares both, selection is required. No variant is inferred from previous runs or the scenario name. The variant selects fixture/application behavior, not verifier rules.
 

@@ -228,6 +228,8 @@ These are implementation decisions, explained for learning. They complement the 
 
 ## L-023: Introduce a checked internal adapter before external registration
 
+**Later extension:** L-030 now permits installed packages implementing this same order bridge. The built-in continues to advertise `external_registration: false`; selected installed adapters advertise true. The original sequencing rationale below remains useful, and full public API acceptance remains pending.
+
 **Choice:** route domain preparation, readiness, quiescence, snapshots, and verification through a built-in adapter; keep Docker ownership, scheduling, budgets, and cleanup in the engine/environment. Expose its capabilities during validation. Move schema setup out of infrastructure provisioning.
 
 **ELI5:** give the lab supervisor an assistant who understands the shop, while the supervisor keeps the room keys and stopwatch.
@@ -248,6 +250,8 @@ These are implementation decisions, explained for learning. They complement the 
 
 ## L-025: Record source provenance separately from scenario intent
 
+**Later extension:** L-031 adds installed distribution files and factory identity alongside the bundled source inventory; the original bundled hash format remains supported.
+
 **Choice:** save an adapter artifact with capabilities, package version, and a bounded inventory of exact package Python-source hashes. Reference it from the manifest, history, and report. Preserve existing plan semantics and offline reading of older completed bundles.
 
 **ELI5:** keep the recipe and write down which instruction book the grader used beside it.
@@ -257,6 +261,8 @@ These are implementation decisions, explained for learning. They complement the 
 **Alternative and cost:** hashing only the adapter file misses verifier changes; hashing the entire machine is expensive and misleading. The selected scope can change for unrelated CLI edits and does not attest dependencies, in-memory monkeypatches, or container equivalence. Strict replay will need additional compatibility checks. See the [adapter guide](adapters.md) for exact scope and limits.
 
 ## L-026: Make the project subset executable and reject unsupported settings
+
+**Later extension:** L-030 implements installed order-adapter names and removes only that rejection. The remaining topology, environment, routing, and readiness restrictions still apply.
 
 **Choice:** support a four-service order manifest with fixed role/route/readiness bindings, known variants, configurable bounded resources, and project ceilings. Reject proxy topology, arbitrary environment values, added writable paths, readiness overrides, and external adapter names until their behavior is implemented.
 
@@ -295,3 +301,33 @@ These are implementation decisions, explained for learning. They complement the 
 **Reason:** editing, moving, or deleting a project must not redirect cleanup or prevent offline inspection. Scenario paths are confined to the selected project root and loaded through bounded regular-file reads.
 
 **Alternative and cost:** reloading YAML during cleanup couples recovery to mutable inputs. Always requiring a new project file would break the existing demo unnecessarily, so absence of a default file preserves legacy implicit runs. The current path checks do not sandbox hostile concurrent filesystem mutation; the original execution-root lock and ownership restrictions remain required.
+
+## L-030: Select trusted installed adapters without expanding the order contract
+
+**Choice:** accept a simple project entry-point name, discover it in the installed `faultline.adapters` group, require one unambiguous registration and an exact distribution version, then construct a fresh checked adapter. Keep `bundled_orders` reserved. Require all lifecycle hooks and matching description identity before Docker. YAML parsing itself remains inert.
+
+**ELI5:** the recipe names an assistant already in the building. The supervisor checks their address card and qualifications before booking equipment.
+
+**Reason:** package selection is a concrete next step toward reusable tooling. It can be implemented and exercised without pretending the order-specific parser, routing, helpers, and schema already support arbitrary applications.
+
+**Alternative and cost:** arbitrary `module:object` paths in YAML blur configuration and code loading; automatic installation adds dependency/network behavior to an experiment. Full service/domain extensibility now would require unimplemented scheduler and quiescence contracts. Installed adapters remain trusted Python code, not sandboxed plugins. The separate example reuses the existing verifier and is explicitly not independent correctness validation. Details and installation commands are in the [guide](installed-adapters.md).
+
+## L-031: Fingerprint actual installed files and the shared judge
+
+**Choice:** parse a bounded wheel RECORD, read actual regular files inside the installation root, and hash their bytes. Combine that inventory with the factory address and Faultline's source hash. Refuse missing files, traversal, symlinks, editable/native installations, and an imported entry module at another source path. Generated bytecode is excluded.
+
+**ELI5:** record the pages actually delivered, including the rulebook the assistant shares with the supervisor, rather than trusting the edition number on the cover.
+
+**Reason:** a wrapper adapter may delegate all grading to Faultline; fingerprinting only the wrapper misses changes to the real judge. Python 3.13's convenience inventory silently removes missing paths, so using it would turn an incomplete installation into apparently complete provenance. Tests exposed this and now protect the direct-RECORD check. Discovery also inspects distributions individually because the convenience entry-point API deduplicates installed copies by name.
+
+**Alternative and cost:** trusting package version or declared RECORD hashes is simpler but does not describe actual bytes. Hashing every installed dependency would be broader, more expensive, and still not attest to running memory. The current inventory has explicit file/byte/count limits and records installer metadata, so equivalent installations can differ. Import caches, dependencies, unlisted files, hostile code, and concurrent edits remain outside the guarantee. This evidence is not signature verification, a sandbox, container equivalence, or replay compatibility enforcement.
+
+## L-032: Give adapter preflight its own bounded allowance
+
+**Choice:** allow ten seconds per adapter resolution for discovery, hashing, import, construction, description, and validation. Reuse the Linux main-thread alarm mechanism. CLI run checks before Docker preflight; direct `run_one` also checks, creating a fresh adapter per repetition. Keep runtime hooks in their existing stage budgets. Report and recovery never resolve packages.
+
+**ELI5:** checking the assistant's credentials gets its own short appointment. Inspecting yesterday's notebook does not require rehiring that assistant.
+
+**Reason:** an installed module can hang even before the first hook. Starting the run timer only after Docker preflight would leave that work unbounded. Separating selection from evidence reading also means uninstalling a package does not prevent investigation or cleanup.
+
+**Alternative and cost:** a subprocess sandbox would need a larger serialization, capability, cancellation, and environment-control protocol. It is unnecessary for the current trusted-code contract. The timer is not hard real-time enforcement and cannot safely police hostile code. Duplicate validation adds bounded overhead and requires side-effect-free hooks; total scenario time excludes adapter preflight. Preflight failures have structured CLI diagnostics but no run bundle because no experiment has started.

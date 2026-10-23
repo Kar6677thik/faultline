@@ -9,7 +9,8 @@ from uuid import UUID, uuid4
 import typer
 from pydantic import ValidationError
 
-from faultline.adapters import AdapterError, bundled_adapter
+from faultline.adapter_loader import resolve_adapter
+from faultline.adapters import AdapterError
 from faultline.artifacts import atomic_json, read_bundle
 from faultline.engine import run_one
 from faultline.environment import client_and_preflight
@@ -108,6 +109,7 @@ def doctor(ctx: typer.Context):
     """Read-only platform, daemon, and image preflight; never pulls images."""
     try:
         loaded = selected_project(ctx.obj["project"])
+        adapter, identity = resolve_adapter(loaded.project if loaded else None)
         if loaded is None:
             client, info = client_and_preflight()
             client.close()
@@ -118,6 +120,7 @@ def doctor(ctx: typer.Context):
                 client.close()
                 checked[variant] = details
             info = {"project": loaded.project.identity(), "variants": checked}
+        info["adapter"] = {"description": adapter.description.model_dump(), "identity": identity}
     except Exception as exc:
         input_error(ctx, "doctor", exc)
     finish(ctx, "doctor", 0, info)
@@ -128,8 +131,7 @@ def validate(ctx: typer.Context, scenario: str):
     """Validate the supported M1 scenario subset without starting Docker."""
     try:
         value, project = experiment_inputs(ctx, scenario)
-        adapter = bundled_adapter()
-        adapter.validate(value)
+        adapter, identity = resolve_adapter(project, value)
     except Exception as exc:
         input_error(ctx, "validate", exc)
     finish(
@@ -142,6 +144,7 @@ def validate(ctx: typer.Context, scenario: str):
             "operations": 1,
             "faults": len(value.faults),
             "adapter": adapter.description.model_dump(),
+            "adapter_identity": identity,
             "project": project.identity() if project else None,
             "effective_limits": value.limits.model_dump(),
             "plan_hash": digest(value.plan()),
@@ -165,7 +168,7 @@ def run(
             variant = project.select_variant(variant)
         elif variant not in {"unsafe", "correct"}:
             raise ValueError("variant must be unsafe or correct")
-        bundled_adapter().validate(value, variant)
+        resolve_adapter(project, value, variant)
         client, info = client_and_preflight(project=project, variant=variant)
     except Exception as exc:
         input_error(ctx, "run", exc)
