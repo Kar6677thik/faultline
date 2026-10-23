@@ -13,8 +13,9 @@ This guide describes the code currently implemented. The [release specifications
 3. [Learn crash recovery](recovery.md): locks, ownership, hard kills, cleanup receipts, and the actual recovery procedure.
 4. [Learn time budgets](deadlines.md): request timeouts, stage deadlines, reserved cleanup time, and what happens when work runs late.
 5. [Understand adapters](adapters.md): separate the supervisor from the domain assistant, check the judge's outputs, and identify its source.
-6. [Look up unfamiliar words](glossary.md): short explanations with Faultline examples.
-7. [Run the README demo](../../README.md#demonstrate-the-defect-and-correction), then compare its evidence with [measured results](../acceptance-results.md).
+6. [Configure a project](projects.md): separate a recipe from its laboratory, constrain paths and budgets, and pin local images.
+7. [Look up unfamiliar words](glossary.md): short explanations with Faultline examples.
+8. [Run the README demo](../../README.md#demonstrate-the-defect-and-correction), then compare its evidence with [measured results](../acceptance-results.md).
 
 ## How to read the evidence
 

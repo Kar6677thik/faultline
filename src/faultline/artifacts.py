@@ -27,7 +27,7 @@ def atomic_json(path: Path, data: dict) -> None:
 
 
 class Bundle:
-    def __init__(self, output: Path, scenario, variant: str):
+    def __init__(self, output: Path, scenario, variant: str, project: dict | None = None):
         self.run_id = str(uuid4())
         self.path = output / "runs" / self.run_id
         self.path.mkdir(parents=True, exist_ok=False)
@@ -39,6 +39,7 @@ class Bundle:
             "run_id": self.run_id,
             "engine_version": __version__,
             "implementation_profile": "milestone1",
+            "project_id": project["project_id"] if project else "orders-m1",
             # Recovery must acquire the original execution lock, not a copied bundle's lock.
             "execution_root": str(output.resolve()),
             "created_at": utc_now(),
@@ -51,6 +52,13 @@ class Bundle:
             "plan_hash": digest(scenario.plan()),
         }
         self.write("plan.json", scenario.plan())
+        if project is not None:
+            self.write("project.json", {"project_artifact_version": 1, "configuration": project})
+            self.manifest["project"] = {
+                "project_id": project["project_id"],
+                "configuration_hash": digest(project),
+                "artifact": "project.json",
+            }
         self.save_manifest()
 
     def _check_budget(self, addition: int):

@@ -30,7 +30,7 @@ These are implementation decisions, explained for learning. They complement the 
 
 **Reason:** the engine can record exact resource identities, limit privileges, prevent published AUT ports, and verify ownership before cleanup. The local Unix socket is required. Windows execution uses WSL2 so process signals and locks follow Linux semantics.
 
-**Alternative and cost:** adopting an existing stack is easier for onboarding but makes accidental targeting and cleanup much harder to control. The current laboratory therefore supports only trusted bundled images and synthetic data. Docker administration remains powerful host access; this is not a malicious-code sandbox. See [environment.py](../../src/faultline/environment.py).
+**Alternative and cost:** adopting an existing stack is easier for onboarding but makes accidental targeting and cleanup much harder to control. The initial laboratory used only trusted bundled images and synthetic data; L-028 extends application image selection while preserving the owned-resource boundary and constrained helpers. Docker administration remains powerful host access; this is not a malicious-code sandbox. See [environment.py](../../src/faultline/environment.py).
 
 ## L-004: Use real PostgreSQL and disposable storage
 
@@ -255,3 +255,43 @@ These are implementation decisions, explained for learning. They complement the 
 **Reason:** a version string alone does not identify an edited local verifier. Hashing the shared bundled package avoids guessing which local imports can affect its behavior.
 
 **Alternative and cost:** hashing only the adapter file misses verifier changes; hashing the entire machine is expensive and misleading. The selected scope can change for unrelated CLI edits and does not attest dependencies, in-memory monkeypatches, or container equivalence. Strict replay will need additional compatibility checks. See the [adapter guide](adapters.md) for exact scope and limits.
+
+## L-026: Make the project subset executable and reject unsupported settings
+
+**Choice:** support a four-service order manifest with fixed role/route/readiness bindings, known variants, configurable bounded resources, and project ceilings. Reject proxy topology, arbitrary environment values, added writable paths, readiness overrides, and external adapter names until their behavior is implemented.
+
+**ELI5:** accept only equipment the laboratory actually knows how to operate.
+
+**Reason:** accepting configuration without applying it gives users false confidence. The first project increment should run end to end, with live-container tests demonstrating that accepted settings take effect.
+
+**Alternative and cost:** a parser for the entire target schema would be easier to advertise but would accept settings the runtime cannot honor. This subset deliberately differs from the complete public schema's five-service layout and default-variant behavior; unsupported features fail clearly. The target specifications are unchanged.
+
+## L-027: Distinguish ceilings from requested values
+
+**Choice:** clip omitted scenario defaults to project ceilings; reject explicit over-ceiling values; then validate the full effective scenario again. Save actual run values in the plan. Omitted project ceilings mean engine hard caps.
+
+**ELI5:** if you did not choose a cooking time, the kitchen may supply a shorter default. If you explicitly ask for more time than the booking allows, it should tell you instead of quietly changing the experiment.
+
+**Reason:** merging configuration is part of experiment semantics. Changing an explicit timeout can change whether a retry occurs. Total/cleanup constraints and retry budgets must still hold after defaults are clipped.
+
+**Alternative and cost:** always taking the minimum hides conflicting intent; always rejecting default values makes a tighter project ceiling unnecessarily hard to use. Explicit-field tracking and post-merge validation add a little code but produce explainable behavior.
+
+## L-028: Pin selected local images without changing the network boundary
+
+**Choice:** allow tagged/digest/full-ID local application references in declared variants. Keep database/helper references constrained to the bundled profile, resolve selected images before execution, check Linux x86-64 architecture and aggregate host capacity, and pass immutable IDs to Docker.
+
+**ELI5:** choose a sealed box already in the laboratory and write down its exact identity before starting.
+
+**Reason:** projects need to select application builds while retaining controlled dependencies. Looking up a local image must not become an implicit registry pull or an arbitrary endpoint option.
+
+**Alternative and cost:** keeping a single application tag prevents useful build comparisons; accepting arbitrary service graphs would require new ownership, credentials, routing, and quiescence contracts. Custom application images remain trusted and must satisfy the existing order schema, permissions, port, and graceful-exit profile. Independent external integration is still a future acceptance gate.
+
+## L-029: Keep recovery independent of current configuration
+
+**Choice:** record project identity and its configuration artifact before resource creation. Use the recorded project label during recovery, alongside exact IDs and existing run/nonce labels. Report/cleanup do not load project YAML. Discover a default project only in the current directory for validate/run/doctor; never silently ignore an invalid one.
+
+**ELI5:** equipment tags and the checkout receipt decide what belongs to yesterday's experiment, even if today's recipe changed.
+
+**Reason:** editing, moving, or deleting a project must not redirect cleanup or prevent offline inspection. Scenario paths are confined to the selected project root and loaded through bounded regular-file reads.
+
+**Alternative and cost:** reloading YAML during cleanup couples recovery to mutable inputs. Always requiring a new project file would break the existing demo unnecessarily, so absence of a default file preserves legacy implicit runs. The current path checks do not sandbox hostile concurrent filesystem mutation; the original execution-root lock and ownership restrictions remain required.

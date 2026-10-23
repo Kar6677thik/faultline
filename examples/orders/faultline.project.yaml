@@ -1,0 +1,67 @@
+# Runnable four-service order profile. The public five-service proxy profile is deferred.
+schema_version: 1
+project_id: orders-example
+adapter:
+  entry_point: bundled_orders
+  contract_version: 1
+  package_version: 0.1.0
+services:
+  - id: application
+    role: application
+    image: faultline-runtime:0.1.0
+    ports: [8000]
+    resources:
+      memory_bytes: 268435456
+      cpu_millis: 1000
+      pids_limit: 64
+    readiness:
+      check: orders_health
+  - id: database
+    role: postgres
+    image: postgres@sha256:eee6c6e1b0894fa4fe0075eb054af9fd1cf39a35321c2d4110626cfe506411fb
+    ports: [5432]
+    resources:
+      memory_bytes: 268435456
+      cpu_millis: 1000
+      pids_limit: 64
+    readiness:
+      check: postgres_ready
+  - id: worker
+    role: worker
+    image: faultline-runtime:0.1.0
+    ports: []
+    resources:
+      memory_bytes: 268435456
+      cpu_millis: 1000
+      pids_limit: 64
+    readiness:
+      check: worker_handshake
+  - id: observer
+    role: observer
+    image: faultline-runtime:0.1.0
+    ports: []
+    resources:
+      memory_bytes: 268435456
+      cpu_millis: 1000
+      pids_limit: 64
+    readiness:
+      check: observer_snapshot
+routes:
+  - id: orders_api
+    service: application
+    port: 8000
+    base_path: /
+variants:
+  unsafe:
+    application_image: faultline-runtime:0.1.0
+  correct:
+    application_image: faultline-runtime:0.1.0
+scenario_paths:
+  - control.yaml
+  - lost-response.yaml
+limits:
+  total_ms: 90000
+  cleanup_ms: 30000
+  max_operations: 1
+  max_attempts: 5
+  max_faults: 1

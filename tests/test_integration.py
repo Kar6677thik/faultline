@@ -15,7 +15,8 @@ from faultline.adapters import OrdersAdapter, bundled_adapter
 from faultline.artifacts import Bundle, read_bundle
 from faultline.engine import run_one
 from faultline.environment import Environment, client_and_preflight
-from faultline.models import Scenario, load_scenario
+from faultline.models import Scenario, digest, load_document, load_scenario
+from faultline.projects import Project
 
 ROOT = Path(__file__).resolve().parents[1]
 pytestmark = [
@@ -153,6 +154,96 @@ def test_malformed_adapter_finding_cannot_pass_real_purchase(
     assert final["records"]["accounts"][0]["balance_minor"] == 800000
     assert report["cleanup"]["complete"]
     assert read_bundle(path)[1]["verdict"] == "ERROR"
+    filters = {"label": f"io.faultline.run={report['run_id']}"}
+    assert not client.containers.list(all=True, filters=filters)
+    assert not client.networks.list(filters=filters)
+
+
+@pytest.mark.parametrize(
+    ("variant", "verdict", "debits"), [("unsafe", "FAIL", 2), ("correct", "PASS", 1)]
+)
+def test_project_resources_images_and_verdicts(
+    monkeypatch, tmp_path, scenario, docker_connection, variant, verdict, debits
+):
+    _client, base_info = docker_connection
+    raw = load_document(ROOT / "examples/orders/faultline.project.yaml")
+    raw["project_id"] = "project-integration"
+    # A local immutable image ID is a supported application reference, not just the bundled tag.
+    raw["variants"][variant]["application_image"] = base_info["images"]["runtime"]
+    for service in raw["services"]:
+        if service["id"] != "database":
+            service["resources"] = {"memory_bytes": 201326592, "cpu_millis": 500, "pids_limit": 48}
+    project = Project.model_validate(raw)
+    inspected = []
+
+    class InspectProject(Environment):
+        def wait_application_ready(self):
+            super().wait_application_ready()
+            for service in project.services:
+                container = self.containers[service.id]
+                container.reload()
+                host = container.attrs["HostConfig"]
+                assert host["Memory"] == service.resources.memory_bytes
+                assert host["NanoCpus"] == service.resources.cpu_millis * 1000000
+                assert host["PidsLimit"] == service.resources.pids_limit
+                assert (
+                    container.attrs["Config"]["Labels"]["io.faultline.project"]
+                    == project.project_id
+                )
+                assert host["ReadonlyRootfs"]
+                assert not host["PortBindings"] and not host["Binds"]
+                inspected.append(service.id)
+            assert self.containers["application"].attrs["Image"] == self.images["application"]
+
+    monkeypatch.setattr("faultline.engine.Environment", InspectProject)
+    client, info = client_and_preflight(project=project, variant=variant)
+    try:
+        path, report = run_one(
+            scenario, variant, tmp_path, client=client, platform_info=info, project=project
+        )
+        assert report["verdict"] == verdict, report["diagnostics"]
+        assert set(inspected) == {"application", "database", "worker", "observer"}
+        assert report["cleanup"]["complete"]
+        assert report["coverage"]["required_applied"] == 1
+        manifest, _ = read_bundle(path)
+        config = json.loads((path / "project.json").read_text())["configuration"]
+        assert config == project.configuration()
+        assert report["project"]["configuration_hash"] == digest(config)
+        assert manifest["project_id"] == project.project_id
+        assert manifest["platform"]["images"]["application"] == info["images"]["application"]
+        plan = json.loads((path / "plan.json").read_text())
+        assert plan["scenario"]["limits"]["total_ms"] == 90000
+        final = json.loads((path / "snapshots/final.json").read_text())
+        assert len(final["records"]["ledger"]) == debits
+        filters = {"label": f"io.faultline.run={report['run_id']}"}
+        assert not client.containers.list(all=True, filters=filters)
+        assert not client.networks.list(filters=filters)
+    finally:
+        client.close()
+
+
+def test_cli_discovers_project_and_selects_its_only_variant(tmp_path, docker_connection):
+    client, _info = docker_connection
+    raw = load_document(ROOT / "examples/orders/faultline.project.yaml")
+    del raw["variants"]["unsafe"]
+    raw["project_id"] = "single-variant-example"
+    for filename in raw["scenario_paths"]:
+        (tmp_path / filename).write_bytes((ROOT / "examples/orders" / filename).read_bytes())
+    (tmp_path / "faultline.project.yaml").write_text(json.dumps(raw))
+    result = subprocess.run(
+        [sys.executable, "-m", "faultline", "--format", "json", "run", "lost-response.yaml"],
+        cwd=tmp_path,
+        capture_output=True,
+        text=True,
+        timeout=100,
+    )
+    assert result.returncode == 0, (result.stdout, result.stderr)
+    envelope = json.loads(result.stdout)
+    path = Path(envelope["artifact_paths"][0])
+    manifest, report = read_bundle(path)
+    assert manifest["variant"] == "correct"
+    assert manifest["project_id"] == "single-variant-example"
+    assert report["cleanup"]["complete"]
     filters = {"label": f"io.faultline.run={report['run_id']}"}
     assert not client.containers.list(all=True, filters=filters)
     assert not client.networks.list(filters=filters)
@@ -394,10 +485,17 @@ def test_drain_deadline_prevents_pass_with_a_still_running_application(
     assert not client.networks.list(filters=filters)
 
 
+@pytest.mark.parametrize("use_project", [False, True])
 def test_cleanup_deadline_preserves_real_leftovers_for_later_recovery(
-    monkeypatch, tmp_path, scenario, docker_connection
+    monkeypatch, tmp_path, scenario, docker_connection, use_project
 ):
     client, info = docker_connection
+    project = None
+    if use_project:
+        project = Project.model_validate(
+            load_document(ROOT / "examples/orders/faultline.project.yaml")
+        )
+        client, info = client_and_preflight(project=project, variant="correct")
 
     class StalledCleanup(Environment):
         def cleanup(self):
@@ -406,11 +504,18 @@ def test_cleanup_deadline_preserves_real_leftovers_for_later_recovery(
             return super().cleanup()
 
     monkeypatch.setattr("faultline.engine.Environment", StalledCleanup)
-    raw = scenario.model_dump(by_alias=True)
-    raw["limits"]["cleanup_ms"] = 2000
+    # Preserve omitted defaults; serializing all defaults would explicitly request
+    # total_ms=300000 and correctly exceed the project's 90000-ms ceiling.
+    raw = scenario.model_dump(by_alias=True, exclude_unset=True)
+    raw.setdefault("limits", {})["cleanup_ms"] = 2000
     try:
         path, report = run_one(
-            Scenario.model_validate(raw), "correct", tmp_path, client=client, platform_info=info
+            Scenario.model_validate(raw),
+            "correct",
+            tmp_path,
+            client=client,
+            platform_info=info,
+            project=project,
         )
         assert report["verdict"] == "ERROR"
         assert all(f["status"] == "PASS" for f in report["invariants"])
@@ -450,3 +555,5 @@ def test_cleanup_deadline_preserves_real_leftovers_for_later_recovery(
                 client, SimpleNamespace(manifest=manifest, run_id=manifest["run_id"]), {}
             )
             assert env.cleanup()["complete"]
+        if use_project:
+            client.close()

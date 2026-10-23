@@ -4,7 +4,7 @@ Imagine Faultline as a laboratory supervisor. The supervisor knows how to book t
 
 The **engine** is the supervisor. The **adapter** is that assistant. For our shop experiment, the assistant understands orders, wallet debits, stock, and confirmation records. A future bank-transfer assistant will understand accounts and equal debit/credit pairs instead.
 
-This increment introduces a **checked internal adapter boundary** for the existing order experiment. It does not yet let you install another adapter or submit your own application. The [public release contract](../../specs/04-adapters.md) remains the destination; the current bridge is deliberately narrower.
+This guide covers the **checked internal adapter boundary** for the existing order experiment. It does not yet let you install another adapter or introduce another business domain. The later [project configuration increment](projects.md) permits selecting a local application image that conforms to the same order contract. The [public release contract](../../specs/04-adapters.md) remains the destination; the current bridge is deliberately narrower.
 
 ## Why this change matters now
 
@@ -83,6 +83,6 @@ For a learning exercise, inspect `test_invalid_verifier_output_is_never_a_busine
 
 ## What remains before external adapters
 
-The scenario parser still has order-specific types; the HTTP scheduler still sends the one bundled order request; the environment still uses the fixed bundled images and topology. The internal `boundary_version: 1` is not a claim of compliance with the full public adapter API version 1. The current boolean quiescence result is narrower than the planned structured ready/pending/unknown protocol.
+The scenario parser still has order-specific types; the HTTP scheduler still sends the one bundled order request; the environment still uses the fixed dependency images and topology. The [project increment](projects.md) adds a runnable restricted manifest, local application image selection, and resource/budget settings. It does not load external adapter packages. The internal `boundary_version: 1` is not a claim of compliance with the full public adapter API version 1. The current boolean quiescence result is narrower than the planned structured ready/pending/unknown protocol.
 
-External registration needs a strict project manifest, pinned package identity, capability negotiation across routes and services, explicit lifecycle contracts, and a separately packaged integration test. This increment creates a tested place to introduce that work without changing the current experiment's semantics.
+External registration still needs a generalized project manifest, pinned installed-package identity, capability negotiation across routes and services, explicit lifecycle contracts, and a separately packaged integration test. The internal boundary and restricted projects create tested places to introduce that work without changing the current experiment's semantics.

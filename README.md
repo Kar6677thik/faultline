@@ -38,6 +38,7 @@ Each run prints its UUID and writes a bundle to `.faultline/runs/<uuid>/`:
 
 - `plan.json` and `manifest.json`: effective scenario, versions, resolved image IDs, ownership records.
 - `adapter.json`: built-in capabilities, package version, and Python-source inventory fingerprint for the adapter and its shared package.
+- `project.json` for project-backed runs: validated project settings and their configuration identity.
 - `history.ndjson`: durable attempt, response witness, fault, client outcome, and lifecycle events.
 - `snapshots/baseline.json` and `snapshots/final.json`: independently read business rows.
 - `report.json` and `report.md`: verdict, expected/observed state, evidence references, and cleanup status.
@@ -58,7 +59,25 @@ Recovery must use the original output root recorded in the manifest. Copied/move
 
 Run/report exit codes: **0 PASS**, **1 FAIL**, **2 invalid input/preflight**, **3 INCONCLUSIVE**, **4 ERROR**, **130 interrupted**. Missing fault coverage cannot produce PASS. Cleanup failures produce ERROR while retaining available findings. Validation rejects features not implemented in this milestone.
 
-The engine now uses a checked internal adapter boundary. `faultline --format json validate examples/orders/control.yaml` shows its supported capabilities without Docker. Incomplete or malformed grading results produce ERROR, even if the returned subset says PASS. Only the bundled order adapter is supported; external registration and project manifests remain planned. See the [ELI5 adapter guide](docs/learning/adapters.md).
+The engine now uses a checked internal adapter boundary. `faultline --format json validate examples/orders/control.yaml` shows its supported capabilities without Docker. Incomplete or malformed grading results produce ERROR, even if the returned subset says PASS. Only the bundled order adapter is supported; external registration remains planned. See the [ELI5 adapter guide](docs/learning/adapters.md).
+
+## Configure a project
+
+The [runnable project example](examples/orders/faultline.project.yaml) declares the current four-service order environment, variant images, container resources, and project budget ceilings:
+
+```bash
+uv run faultline --project examples/orders/faultline.project.yaml --format json validate lost-response.yaml
+uv run faultline --project examples/orders/faultline.project.yaml doctor
+uv run faultline --project examples/orders/faultline.project.yaml run lost-response.yaml --variant correct
+```
+
+With a project, the scenario path is relative to the project file's directory and must stay inside it. Output remains relative to the current directory unless `--output` is supplied. Without `--project`, validate/run/doctor discover `faultline.project.yaml` in the current directory; if absent, the original implicit demo remains available. An invalid discovered manifest is an error. A project with only one declared variant permits omitting `--variant`.
+
+Project limits cap scenario budgets. Omitted scenario defaults are clipped to those ceilings; explicit over-ceiling requests are rejected. JSON validation shows effective limits and the plan/configuration hashes. Docker enforces declared memory, CPU, and PID limits. Preflight resolves selected local application images to immutable IDs and checks architecture/host capacity without pulling images.
+
+This is a restricted order-profile manifest, not the complete v1 project/adapter API. The helper/database images, role bindings, route, permissions, and readiness methods remain constrained. External adapters, proxy topology, custom environment mappings, extra writable paths, and readiness overrides are rejected. A custom local application image must conform to the existing order fixture. Read the [ELI5 project guide](docs/learning/projects.md) for exact settings, image requirements, path rules, and examples.
+
+Offline reporting and scoped cleanup use recorded evidence and ownership, not current project YAML. They remain usable when the project file changes or disappears.
 
 ## Time budgets
 
@@ -81,7 +100,7 @@ The Linux/WSL coordinator runs on the main Python thread and refuses to take ove
 
 ## Verification
 
-See the [initial acceptance results](docs/acceptance-results.md), [recovery acceptance results](docs/recovery-acceptance-results.md), [deadline acceptance results](docs/deadline-acceptance-results.md), and [adapter acceptance results](docs/adapter-acceptance-results.md) for completed checks, retained evidence, and limits of the results.
+See the [project acceptance results](docs/project-acceptance-results.md) for the latest validation, and the earlier [initial](docs/acceptance-results.md), [recovery](docs/recovery-acceptance-results.md), [deadline](docs/deadline-acceptance-results.md), and [adapter](docs/adapter-acceptance-results.md) results for their measured phases and retained evidence.
 
 ```bash
 uv run ruff check src tests
@@ -99,4 +118,4 @@ FAULTLINE_INTEGRATION=1 FAULTLINE_ACCEPTANCE_REPEATS=20 \
 
 Every trial creates and removes its own database, application, worker, observer, and networks. Tests verify actual ledger totals, fault coverage, report integrity, and absence of owned leftovers. Independent verifier fixtures also test duplicate records, orphan effects, false success responses, lost updates, missing evidence, and a backend that performs no work.
 
-Use only the bundled trusted images and synthetic fixtures. There is no arbitrary endpoint or production target option. The remaining release work—public adapters, concurrent scenario scheduling, Toxiproxy faults, strict replay, reduction, React, and CI packaging—is tracked in the specification and implementation-status document.
+Use only trusted local application images and synthetic fixtures; dependency/helper images remain constrained to the bundled profile. There is no arbitrary endpoint or production target option. The remaining release work—public adapters, concurrent scenario scheduling, Toxiproxy faults, strict replay, reduction, React, and CI packaging—is tracked in the specification and implementation-status document.

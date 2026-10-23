@@ -9,6 +9,7 @@ from faultline.deadlines import DeadlineExceeded, RunDeadlines, check_alarm_avai
 from faultline.environment import Environment, client_and_preflight
 from faultline.locking import execution_lock
 from faultline.models import canonical_bytes, verdict
+from faultline.projects import Project
 
 
 def execute_attempts(
@@ -112,16 +113,27 @@ def execute_attempts(
     return attempts, applied, complete
 
 
-def run_one(scenario, variant, output, *, client=None, platform_info=None):
+def run_one(scenario, variant, output, *, client=None, platform_info=None, project=None):
     # Direct Python callers must exclude recovery just as CLI callers do.
+    if project is not None:
+        project = Project.model_validate(project.configuration())
+        variant = project.select_variant(variant)
+        scenario = project.scenario(scenario.model_dump(by_alias=True, exclude_unset=True))
     adapter = bundled_adapter()
     adapter.validate(scenario, variant)
     check_alarm_available()
     with execution_lock(output):
         owns_client = client is None
         if client is None:
-            client, platform_info = client_and_preflight()
+            client, platform_info = client_and_preflight(project=project, variant=variant)
         try:
+            if project is not None and (
+                platform_info.get("project_configuration_hash")
+                != project.identity()["configuration_hash"]
+                or platform_info.get("variant") != variant
+                or "application" not in platform_info.get("images", {})
+            ):
+                raise ValueError("preflight must resolve images for this exact project and variant")
             return _run_one(
                 scenario,
                 variant,
@@ -129,6 +141,7 @@ def run_one(scenario, variant, output, *, client=None, platform_info=None):
                 adapter=adapter,
                 client=client,
                 platform_info=platform_info,
+                project=project,
             )
         except DeadlineExceeded as exc:
             # Initialization/finalization may have no time to write a complete report.
@@ -138,14 +151,14 @@ def run_one(scenario, variant, output, *, client=None, platform_info=None):
                 client.close()
 
 
-def _run_one(scenario, variant, output, *, adapter, client=None, platform_info=None):
+def _run_one(scenario, variant, output, *, adapter, client=None, platform_info=None, project=None):
     limits = scenario.limits
     deadlines = RunDeadlines(limits)
     with deadlines.stage("initializing", limits.provisioning_ms, started=deadlines.started):
-        bundle = Bundle(output, scenario, variant)
+        bundle = Bundle(output, scenario, variant, project.configuration() if project else None)
         bundle.manifest["platform"] = platform_info
         bundle.save_manifest()
-        env = Environment(client, bundle, platform_info["images"])
+        env = Environment(client, bundle, platform_info["images"], project)
     findings, diagnostics, attempts = [], [], []
     applied = set()
     complete = False
@@ -339,6 +352,7 @@ def finalize_run(
             }
         )
     report = {
+        "project": bundle.manifest.get("project"),
         "adapter": bundle.manifest.get("adapter"),
         "verdict": verdict(
             findings, diagnostics, complete and required <= applied and not interrupted

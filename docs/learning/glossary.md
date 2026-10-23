@@ -8,6 +8,12 @@
 
 **Source provenance:** a record of which package version and source-file fingerprint produced a result. It helps identify the judge; it is not a digital signature or proof of correctness.
 
+**Project / scenario:** the project describes the laboratory's services, application images, and limits; the scenario describes the operations and failures to try inside it. The supported manifest is explained in the [project guide](projects.md).
+
+**Ceiling / default / explicit value:** a ceiling is the largest permitted value, a default is used when you omit a setting, and an explicit value is what you actually wrote. Project ceilings may clip omitted defaults; explicit values above the ceiling are rejected.
+
+**MiB / CPU millis / PID limit:** MiB is 1,048,576 bytes; 1000 CPU millis permits one CPU's scheduling capacity; a PID limit bounds processes/threads counted by the container. These Docker limits do not promise throughput or startup success.
+
 **API / endpoint:** an interface another program calls. An endpoint is a particular operation, such as `POST /orders`.
 
 **Artifact / bundle:** a saved output file, or the folder collecting a run's files. Artifacts include the plan, history, snapshots, and report.

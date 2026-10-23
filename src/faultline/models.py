@@ -2,7 +2,9 @@
 
 import hashlib
 import json
+import os
 import re
+import stat
 from pathlib import Path
 from typing import Annotated, Literal
 
@@ -195,10 +197,25 @@ def _unique_mapping(loader, node):
 UniqueLoader.add_constructor(yaml.resolver.BaseResolver.DEFAULT_MAPPING_TAG, _unique_mapping)
 
 
-def load_scenario(path: Path) -> Scenario:
-    if path.stat().st_size > 1048576:
-        raise ValueError("scenario exceeds 1 MiB")
-    raw = path.read_text(encoding="utf-8")
+def load_document(path: Path) -> dict:
+    """Shared bounded YAML loader; a FIFO must not turn validation into a blocking read."""
+    flags = os.O_RDONLY | getattr(os, "O_NONBLOCK", 0) | getattr(os, "O_NOFOLLOW", 0)
+    descriptor = os.open(path, flags)
+    with os.fdopen(descriptor, "rb") as stream:
+        metadata = os.fstat(stream.fileno())
+        if not stat.S_ISREG(metadata.st_mode) or metadata.st_size > 1048576:
+            raise ValueError("configuration must be a regular file of at most 1 MiB")
+        raw = stream.read(1048577)
+    if len(raw) > 1048576:
+        raise ValueError("configuration exceeds 1 MiB")
+    try:
+        return parse_document(raw.decode("utf-8"))
+    except (yaml.YAMLError, UnicodeDecodeError) as exc:
+        # Parser errors can otherwise print entire lines containing rejected secret values.
+        raise ValueError("Invalid UTF-8 YAML syntax or unsupported YAML tag") from exc
+
+
+def parse_document(raw: str) -> dict:
     depth = 0
     for event in yaml.parse(raw):
         if getattr(event, "anchor", None) or isinstance(event, yaml.AliasEvent):
@@ -209,7 +226,18 @@ def load_scenario(path: Path) -> Scenario:
                 raise ValueError("YAML exceeds maximum nesting depth")
         elif isinstance(event, (yaml.MappingEndEvent, yaml.SequenceEndEvent)):
             depth -= 1
-    return Scenario.model_validate(yaml.load(raw, Loader=UniqueLoader))
+    value = yaml.load(raw, Loader=UniqueLoader)
+    if not isinstance(value, dict):
+        raise ValueError("configuration must contain a mapping")
+    try:
+        canonical_bytes(value)
+    except (ValueError, TypeError) as exc:
+        raise ValueError("configuration must contain finite JSON-compatible values") from exc
+    return value
+
+
+def load_scenario(path: Path) -> Scenario:
+    return Scenario.model_validate(load_document(path))
 
 
 def verdict(findings: list[dict], diagnostics: list[dict], coverage_complete: bool) -> str:

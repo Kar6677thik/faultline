@@ -21,6 +21,8 @@ Open [lost-response.yaml](../../examples/orders/lost-response.yaml). YAML is a r
 
 [adapters.py](../../src/faultline/adapters.py) also checks whether the built-in adapter supports the recipe and exposes its capabilities in validation output. The engine now calls this checked internal boundary for domain work. Think of the engine as the lab supervisor and the adapter as the assistant who understands the shop. Read the [adapter guide](adapters.md) for the hooks, contract checks, and limits; external adapter installation remains unsupported.
 
+Optionally select the [example project](../../examples/orders/faultline.project.yaml) with global `--project`. [projects.py](../../src/faultline/projects.py) validates the lab's service settings, constrains scenario files to its directory, and merges budget ceilings before adapter validation. The [project guide](projects.md) explains why an omitted default can be clipped while an explicit over-ceiling request is rejected. With a project, scenario paths are project-relative; artifact output remains relative to the current directory.
+
 ## 2. Enter through the CLI and acquire the lock
 
 [cli.py](../../src/faultline/cli.py) translates terminal arguments into engine calls. Typer handles command parsing and help. `python -m faultline` enters through [__main__.py](../../src/faultline/__main__.py); the installed `faultline` command reaches the same CLI.
@@ -47,6 +49,8 @@ There are four containers:
 There are two internal networks. The client network connects worker and application. The storage network connects application, database, and observer. There are no published application ports. This is currently direct database access; a future proxy will require a different topology.
 
 An image is a packaged program. A container is a running or stopped instance of that image. The runtime image is built by the [Dockerfile](../../Dockerfile); the host and runtime package versions must match the code being tested. Image digests identify exact image content.
+
+A project can select a local application image that conforms to the same order fixture, and lower per-container CPU/memory/PID allocations within supported bounds. Preflight checks host capacity and image architecture and pins selected image IDs. Dependency/helper images and the private network topology remain constrained. No image is pulled during preflight or execution.
 
 The environment records every returned Docker resource ID and labels the resource with Faultline ownership information. Cleanup needs both the record and matching labels. A name such as `fl-example` alone is not authorization to delete anything.
 
@@ -138,7 +142,7 @@ A definite business violation can remain FAIL even if the requested fault was no
 
 [artifacts.py](../../src/faultline/artifacts.py) writes the plan, manifest, event history, snapshots, and reports. JSON stores structured objects; NDJSON stores one JSON event per line. Sequence numbers expose missing or reordered history entries. Hashes detect file changes relative to the recorded inventory; they are not digital signatures and do not prove who created an artifact.
 
-New runs also save `adapter.json`: capabilities, package version, and the source-file inventory fingerprint. The manifest and report reference that identity. This helps identify which judge produced the result; it does not implement historical replay or prove host/container source equivalence.
+New runs also save `adapter.json`: capabilities, package version, and the source-file inventory fingerprint. Project-backed runs save `project.json` and its configuration hash. The manifest and report reference these identities. This helps identify the judge and laboratory used; it does not implement historical replay or prove host/container source equivalence. Cleanup uses the project label saved before resource creation and does not reload current YAML.
 
 Writes use a temporary file and replacement for complete JSON documents. History events are appended and flushed to disk. These choices reduce partial-write ambiguity; they do not promise recovery from every disk failure or power loss.
 
@@ -151,6 +155,7 @@ Cleanup removes recorded containers before their networks and verifies ownership
 - [test_worker.py](../../tests/test_worker.py) checks message framing, truncated streams, frame-size limits, and socket cleanup.
 - [test_verifier.py](../../tests/test_verifier.py) uses hand-built records to check the judge independently of the application's transaction code.
 - [test_adapters.py](../../tests/test_adapters.py) checks the judge's result contract, malformed snapshots, capability refusal before Docker, hook errors, and source provenance.
+- [test_projects.py](../../tests/test_projects.py) checks strict manifests, confined paths, ceiling/default merging, local image selection, host budgets, and recorded project ownership.
 - [test_artifacts.py](../../tests/test_artifacts.py) checks evidence integrity and incomplete/corrupt bundles.
 - [test_environment.py](../../tests/test_environment.py) checks ownership and failure-path cleanup.
 - [test_cli.py](../../tests/test_cli.py) checks terminal contracts and secret-safe validation output.

@@ -22,7 +22,7 @@ class PreflightError(ValueError):
     pass
 
 
-def client_and_preflight(*, require_images=True):
+def client_and_preflight(*, require_images=True, project=None, variant=None):
     if platform.system() != "Linux" or platform.machine() not in {"x86_64", "AMD64"}:
         raise PreflightError(
             "Execution requires Linux x86-64; use Debian/Ubuntu in WSL2 on Windows"
@@ -31,37 +31,57 @@ def client_and_preflight(*, require_images=True):
     if host != "unix:///var/run/docker.sock":
         raise PreflightError("Only the local /var/run/docker.sock daemon is supported")
     client = docker.DockerClient(base_url=host, timeout=15)
-    info = client.info()
-    if info.get("OSType") != "linux" or info.get("Architecture") not in {"x86_64", "amd64"}:
-        client.close()
-        raise PreflightError("Docker must run Linux x86-64 containers")
     try:
-        images = (
-            {
-                "runtime": client.images.get(RUNTIME_IMAGE).id,
-                "postgres": client.images.get(POSTGRES_IMAGE).id,
-            }
-            if require_images
-            else {}
+        info = client.info()
+        if info.get("OSType") != "linux" or info.get("Architecture") not in {"x86_64", "amd64"}:
+            raise PreflightError("Docker must run Linux x86-64 containers")
+        references = (
+            {"runtime": RUNTIME_IMAGE, "postgres": POSTGRES_IMAGE} if require_images else {}
         )
+        if project is not None:
+            variant = project.select_variant(variant)
+            memory = sum(service.resources.memory_bytes for service in project.services)
+            cpu = sum(service.resources.cpu_millis for service in project.services)
+            if memory > info.get("MemTotal", 0) or cpu > info.get("NCPU", 0) * 1000:
+                raise PreflightError("project resource allocations exceed the Docker host budget")
+            references["application"] = project.variants[variant].application_image
+        images = {}
+        for role, reference in references.items():
+            image = client.images.get(reference)
+            if image.attrs.get("Os") != "linux" or image.attrs.get("Architecture") != "amd64":
+                raise PreflightError("selected images must be Linux x86-64")
+            images[role] = image.id
+        result = {
+            "os": platform.system(),
+            "architecture": platform.machine(),
+            "kernel": platform.release(),
+            "docker": client.version()["Version"],
+            "images": images,
+        }
+        if project is not None:
+            result.update(
+                project_configuration_hash=project.identity()["configuration_hash"],
+                variant=variant,
+                image_references=references,
+            )
     except NotFound as exc:
         client.close()
-        raise PreflightError("Images missing; follow README build/pull commands first") from exc
-    return client, {
-        "os": platform.system(),
-        "architecture": platform.machine(),
-        "kernel": platform.release(),
-        "docker": client.version()["Version"],
-        "images": images,
-    }
+        raise PreflightError(
+            "Images missing locally; build/pull the declared images first"
+        ) from exc
+    except BaseException:
+        client.close()
+        raise
+    return client, result
 
 
 class Environment:
-    def __init__(self, client, bundle, images: dict):
+    def __init__(self, client, bundle, images: dict, project=None):
         self.client, self.bundle, self.images = client, bundle, images
+        self.services = {service.id: service for service in project.services} if project else {}
         self.labels = {
             f"{LABEL_PREFIX}.managed": "true",
-            f"{LABEL_PREFIX}.project": "orders-m1",
+            f"{LABEL_PREFIX}.project": bundle.manifest.get("project_id", "orders-m1"),
             f"{LABEL_PREFIX}.run": bundle.run_id,
             f"{LABEL_PREFIX}.nonce": bundle.manifest["ownership_nonce"],
         }
@@ -87,6 +107,10 @@ class Environment:
             raise RuntimeError("resource missing from ownership manifest")
 
     def create_container(self, role, networks, *, command=None, environment=None, database=False):
+        resources = self.services[role].resources if self.services else None
+        image = self.images["postgres" if database else "runtime"]
+        if role == "application":
+            image = self.images.get("application", image)
         tmpfs = {"/tmp": "rw,noexec,nosuid,size=16777216"}
         if database:
             tmpfs.update(
@@ -96,7 +120,7 @@ class Environment:
                 }
             )
         container = self.client.containers.create(
-            self.images["postgres" if database else "runtime"],
+            image,
             command=command,
             name=f"fl-{self.bundle.run_id}-{role}",
             hostname=role,
@@ -113,9 +137,9 @@ class Environment:
             tmpfs=tmpfs,
             cap_drop=["ALL"],
             security_opt=["no-new-privileges:true"],
-            mem_limit="256m",
-            nano_cpus=1000000000,
-            pids_limit=64,
+            mem_limit=resources.memory_bytes if resources else 268435456,
+            nano_cpus=resources.cpu_millis * 1000000 if resources else 1000000000,
+            pids_limit=resources.pids_limit if resources else 64,
             restart_policy={"Name": "no"},
             detach=True,
             log_config=docker.types.LogConfig(

@@ -69,6 +69,15 @@ def read_ownership(output: Path, run_id: str) -> dict:
     ):
         raise ValueError("Unsupported ownership manifest version, profile, or run identity")
     canonical_uuid(manifest.get("ownership_nonce"))
+    project_id = manifest.get("project_id", "orders-m1")
+    if not isinstance(project_id, str) or not re.fullmatch(r"[a-z][a-z0-9_-]{0,63}", project_id):
+        raise ValueError("Invalid recorded project ownership label")
+    if "project" in manifest:
+        if (
+            not isinstance(manifest["project"], dict)
+            or manifest["project"].get("project_id") != project_id
+        ):
+            raise ValueError("Recorded project identity disagrees with the ownership label")
     resources = manifest.get("resources")
     if not isinstance(resources, list) or len(resources) > 6:
         raise ValueError("Invalid milestone1 resource inventory")

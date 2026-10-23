@@ -14,7 +14,8 @@ from faultline.artifacts import atomic_json, read_bundle
 from faultline.engine import run_one
 from faultline.environment import client_and_preflight
 from faultline.locking import ActiveRunError, execution_lock
-from faultline.models import EXIT_CODES, load_scenario
+from faultline.models import EXIT_CODES, digest, load_scenario
+from faultline.projects import load_project
 from faultline.recovery import recover, recovery_manifests
 
 app = typer.Typer(
@@ -30,10 +31,13 @@ def options(
     output: Annotated[Path, typer.Option(help="Artifact root")] = Path(".faultline"),
     format: Annotated[str, typer.Option(help="text or json")] = "text",
     no_color: Annotated[bool, typer.Option()] = False,
+    project: Annotated[
+        Path | None, typer.Option(help="Project manifest; defaults to cwd if present")
+    ] = None,
 ):
     if format not in {"text", "json"}:
         raise typer.BadParameter("format must be text or json")
-    ctx.obj = {"output": output.resolve(), "format": format}
+    ctx.obj = {"output": output.resolve(), "format": format, "project": project}
     if no_color:
         ctx.color = False
 
@@ -84,22 +88,46 @@ def input_error(ctx, command, exc, code=2):
     )
 
 
+def selected_project(path: Path | None):
+    if path is None:
+        path = Path("faultline.project.yaml")
+        if not path.exists() and not path.is_symlink():
+            return None
+    return load_project(path)
+
+
+def experiment_inputs(ctx, scenario):
+    loaded = selected_project(ctx.obj["project"])
+    if loaded is None:
+        return load_scenario(Path(scenario)), None
+    return loaded.load_scenario(scenario), loaded.project
+
+
 @app.command()
 def doctor(ctx: typer.Context):
     """Read-only platform, daemon, and image preflight; never pulls images."""
     try:
-        client, info = client_and_preflight()
-        client.close()
+        loaded = selected_project(ctx.obj["project"])
+        if loaded is None:
+            client, info = client_and_preflight()
+            client.close()
+        else:
+            checked = {}
+            for variant in loaded.project.variants:
+                client, details = client_and_preflight(project=loaded.project, variant=variant)
+                client.close()
+                checked[variant] = details
+            info = {"project": loaded.project.identity(), "variants": checked}
     except Exception as exc:
         input_error(ctx, "doctor", exc)
     finish(ctx, "doctor", 0, info)
 
 
 @app.command()
-def validate(ctx: typer.Context, scenario: Path):
+def validate(ctx: typer.Context, scenario: str):
     """Validate the supported M1 scenario subset without starting Docker."""
     try:
-        value = load_scenario(scenario)
+        value, project = experiment_inputs(ctx, scenario)
         adapter = bundled_adapter()
         adapter.validate(value)
     except Exception as exc:
@@ -114,6 +142,9 @@ def validate(ctx: typer.Context, scenario: Path):
             "operations": 1,
             "faults": len(value.faults),
             "adapter": adapter.description.model_dump(),
+            "project": project.identity() if project else None,
+            "effective_limits": value.limits.model_dump(),
+            "plan_hash": digest(value.plan()),
         },
     )
 
@@ -121,17 +152,21 @@ def validate(ctx: typer.Context, scenario: Path):
 @app.command()
 def run(
     ctx: typer.Context,
-    scenario: Path,
-    variant: Annotated[str, typer.Option(help="unsafe or correct")],
+    scenario: str,
+    variant: Annotated[
+        str | None, typer.Option(help="unsafe or correct; may omit for one project variant")
+    ] = None,
     repeat: Annotated[int, typer.Option(min=1, max=100)] = 1,
 ):
     """Run one purchase from a fresh fixture; repeats never reuse application storage."""
     try:
-        if variant not in {"unsafe", "correct"}:
+        value, project = experiment_inputs(ctx, scenario)
+        if project is not None:
+            variant = project.select_variant(variant)
+        elif variant not in {"unsafe", "correct"}:
             raise ValueError("variant must be unsafe or correct")
-        value = load_scenario(scenario)
         bundled_adapter().validate(value, variant)
-        client, info = client_and_preflight()
+        client, info = client_and_preflight(project=project, variant=variant)
     except Exception as exc:
         input_error(ctx, "run", exc)
     paths, reports = [], []
@@ -150,7 +185,12 @@ def run(
         for index in range(repeat):
             typer.echo(f"Run {index + 1}/{repeat}: {value.id} ({variant})", err=True)
             path, result = run_one(
-                value, variant, ctx.obj["output"], client=client, platform_info=info
+                value,
+                variant,
+                ctx.obj["output"],
+                client=client,
+                platform_info=info,
+                project=project,
             )
             paths.append(path)
             reports.append(result)
@@ -167,6 +207,7 @@ def run(
     counts = {state: sum(r["verdict"] == state for r in reports) for state in EXIT_CODES}
     overall = next(state for state in ("ERROR", "FAIL", "INCONCLUSIVE", "PASS") if counts[state])
     summary = {
+        "project": project.identity() if project else None,
         "verdict": overall,
         "counts": counts,
         "scheduled": repeat,
