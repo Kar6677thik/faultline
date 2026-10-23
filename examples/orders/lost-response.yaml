@@ -1,0 +1,44 @@
+schema_version: 1
+id: lost_response_purchase
+adapter_profile: orders_v1
+fixture: standard_wallet
+seed: 42
+concurrency: 1
+operations:
+  - id: purchase_a
+    kind: create_order
+    logical_id: purchase-a
+    route: orders_api
+    request:
+      method: POST
+      path: /orders
+      headers:
+        Idempotency-Key: purchase-a-key
+      json:
+        purchase_id: purchase-a
+        account_id: buyer-a
+        sku: sku-a
+        quantity: 1
+    retry:
+      max_attempts: 2
+      on: [timeout, connection_error]
+      backoff_ms: [100]
+    timeout_ms: 1000
+faults:
+  - id: hide_first_response
+    kind: response_suppress
+    target: orders_api
+    trigger:
+      event: upstream_response_complete
+      operation_id: purchase_a
+      attempt: 1
+      status: 201
+    required: true
+invariants:
+  - orders.at_most_one_debit
+  - orders.purchase_atomicity
+  - orders.wallet_conservation
+  - orders.inventory_conservation
+  - orders.confirmation_intent
+  - orders.idempotency_contract
+  - orders.completed_purchase
