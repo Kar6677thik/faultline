@@ -6,7 +6,9 @@ import shutil
 import signal
 import subprocess
 import sys
+import threading
 import time
+from copy import deepcopy
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -27,6 +29,194 @@ pytestmark = [
         reason="set FAULTLINE_INTEGRATION=1 with local Docker images built",
     ),
 ]
+
+
+@pytest.mark.parametrize("duplicate", [False, True])
+def test_concurrent_orders_reconcile_shared_authority(tmp_path, docker_connection, duplicate):
+    client, info = docker_connection
+    raw = load_document(ROOT / "examples/orders/control.yaml")
+    first = raw["operations"][0]
+    raw["concurrency"] = 3
+    raw["barriers"] = [{"id": "together", "members": [f"op_{i}" for i in range(3)]}]
+    raw["operations"] = []
+    for index in range(3):
+        op = deepcopy(first)
+        op.update(id=f"op_{index}", barrier="together")
+        if not duplicate:
+            op["logical_id"] = op["request"]["json"]["purchase_id"] = f"purchase-{index}"
+            op["request"]["headers"]["Idempotency-Key"] = f"key-{index}"
+        raw["operations"].append(op)
+    path, report = run_one(
+        Scenario.model_validate(raw), "correct", tmp_path, client=client, platform_info=info
+    )
+    assert report["verdict"] == "PASS", report["diagnostics"]
+    final = json.loads((path / "snapshots/final.json").read_text())["records"]
+    count = 1 if duplicate else 3
+    assert len(final["orders"]) == len(final["ledger"]) == count
+    assert final["accounts"][0]["balance_minor"] == 1000000 - 200000 * count
+    assert len(report["invariants"]) == 7 * count
+    history = [json.loads(line) for line in (path / "history.ndjson").read_text().splitlines()]
+    assert report["cleanup"]["complete"]
+    assert read_bundle(path)[1]["verdict"] == "PASS"
+    print(f"concurrent duplicate={duplicate}: {path}, events={len(history)}", flush=True)
+
+
+@pytest.mark.parametrize("kind", ["proxy_latency", "proxy_disconnect", "process_restart"])
+def test_acknowledged_fault_matrix(tmp_path, docker_connection, kind):
+    client, info = docker_connection
+    raw = load_document(ROOT / "examples/orders/control.yaml")
+    raw["operations"][0].update(
+        after_faults=["impair"],
+        timeout_ms=1000,
+        retry={
+            "max_attempts": 3,
+            "on": ["timeout", "connection_error", "http_503"],
+            "backoff_ms": [1000, 1000],
+        },
+    )
+    fault = {"id": "impair", "kind": kind, "target": "database", "trigger": {"offset_ms": 0}}
+    if kind == "proxy_latency":
+        fault.update(latency_ms=200, direction="downstream", duration_ms=600)
+    elif kind == "proxy_disconnect":
+        fault.update(duration_ms=500)
+    else:
+        fault.update(target="application", downtime_ms=500)
+    raw["faults"] = [fault]
+    path, report = run_one(
+        Scenario.model_validate(raw), "correct", tmp_path, client=client, platform_info=info
+    )
+    assert report["verdict"] == "PASS", report
+    assert report["coverage"]["required_applied"] == 1
+    assert report["cleanup"]["complete"]
+    history = [json.loads(line) for line in (path / "history.ndjson").read_text().splitlines()]
+    print(
+        f"fault {kind}: {path}, outcomes={[a['outcome'] for a in report['attempts']]}", flush=True
+    )
+    assert len(history) > 10
+
+
+@pytest.mark.parametrize(
+    "expectation", ["insufficient_funds", "invalid_quantity", "idempotency_conflict"]
+)
+def test_expected_rejections_are_verified_without_new_effects(
+    tmp_path, docker_connection, expectation
+):
+    client, info = docker_connection
+    raw = load_document(ROOT / "examples/orders/control.yaml")
+    op = raw["operations"][0]
+    if expectation == "idempotency_conflict":
+        rejected = deepcopy(op)
+        rejected.update(id="conflict", after=[op["id"]], expectation=expectation)
+        rejected["request"]["json"]["quantity"] = 2
+        raw["operations"].append(rejected)
+    else:
+        op["expectation"] = expectation
+        op["request"]["json"]["quantity"] = 6 if expectation == "insufficient_funds" else 0
+    path, report = run_one(
+        Scenario.model_validate(raw), "correct", tmp_path, client=client, platform_info=info
+    )
+    assert report["verdict"] == "PASS", report
+    state = json.loads((path / "snapshots/final.json").read_text())["records"]
+    assert len(state["ledger"]) == (1 if expectation == "idempotency_conflict" else 0)
+
+
+def test_compatible_faults_compose_with_acknowledged_gate(tmp_path, docker_connection):
+    client, info = docker_connection
+    raw = load_document(ROOT / "examples/orders/lost-response.yaml")
+    raw["operations"][0]["after_faults"] = ["latency"]
+    raw["operations"][0]["timeout_ms"] = 2000
+    raw["faults"].append(
+        {
+            "id": "latency",
+            "kind": "proxy_latency",
+            "target": "database",
+            "trigger": {"offset_ms": 0},
+            "latency_ms": 20,
+            "direction": "downstream",
+            "duration_ms": 400,
+        }
+    )
+    path, report = run_one(
+        Scenario.model_validate(raw), "correct", tmp_path, client=client, platform_info=info
+    )
+    assert report["verdict"] == "PASS", report
+    assert report["coverage"]["required_applied"] == 2 and report["cleanup"]["complete"]
+    assert read_bundle(path)[1]["verdict"] == "PASS"
+
+
+@pytest.mark.parametrize("failure", ["worker_stream", "disk_full"])
+def test_execution_harness_failures_retain_bundle_and_cleanup(
+    tmp_path, docker_connection, monkeypatch, failure
+):
+    client, info = docker_connection
+    scenario = load_scenario(ROOT / "examples/orders/control.yaml")
+    if failure == "worker_stream":
+
+        class LostWorker(Environment):
+            def wait_application_ready(self):
+                super().wait_application_ready()
+                self.worker_session.close()
+
+        monkeypatch.setattr("faultline.engine.Environment", LostWorker)
+    else:
+        original = Bundle.event
+
+        def disk_full(self, kind, payload, **refs):
+            if kind == "attempt_dispatched":
+                raise OSError(28, "No space left on device (injected at artifact boundary)")
+            return original(self, kind, payload, **refs)
+
+        monkeypatch.setattr(Bundle, "event", disk_full)
+    path, report = run_one(scenario, "correct", tmp_path, client=client, platform_info=info)
+    assert report["verdict"] == "ERROR" and report["cleanup"]["complete"]
+    assert (path / "plan.json").is_file() and (path / "snapshots/baseline.json").is_file()
+    assert read_bundle(path)[1]["verdict"] == "ERROR"
+    filters = {"label": f"io.faultline.run={report['run_id']}"}
+    assert not client.containers.list(all=True, filters=filters)
+    assert not client.networks.list(filters=filters)
+
+
+@pytest.mark.parametrize("crash", [False, True])
+def test_handler_outlives_timeout_and_registry_reconciles(
+    tmp_path, docker_connection, monkeypatch, crash
+):
+    client, info = docker_connection
+    raw = load_document(ROOT / "examples/orders/control.yaml")
+    raw["operations"][0].update(timeout_ms=300)
+    raw["operations"][0]["retry"] = {"max_attempts": 1, "on": [], "backoff_ms": []}
+    if crash:
+        raw["faults"] = [
+            {
+                "id": "crash_handler",
+                "kind": "process_restart",
+                "target": "application",
+                "trigger": {
+                    "event": "client_outcome",
+                    "operation_id": raw["operations"][0]["id"],
+                    "attempt": 1,
+                },
+                "downtime_ms": 0,
+            }
+        ]
+
+    class DelayedEnvironment(Environment):
+        def create_container(self, role, networks, **kwargs):
+            if role == "application":
+                kwargs["environment"]["FL_TEST_HANDLER_DELAY_MS"] = "3000" if crash else "1000"
+            return super().create_container(role, networks, **kwargs)
+
+    monkeypatch.setattr("faultline.engine.Environment", DelayedEnvironment)
+    path, report = run_one(
+        Scenario.model_validate(raw), "correct", tmp_path, client=client, platform_info=info
+    )
+    assert report["verdict"] == ("FAIL" if crash else "PASS"), report
+    assert report["attempts"][0]["outcome"] == "timeout"
+    final = json.loads((path / "snapshots/final.json").read_text())
+    assert final["quiescent"] and final["application_sessions"] == 0
+    assert len(final["records"]["orders"]) == (0 if crash else 1)
+    history = [json.loads(line) for line in (path / "history.ndjson").read_text().splitlines()]
+    assert any(e["type"] == "inflight_stale_cleared" for e in history)
+    print(f"delayed handler crash={crash}: {path}", flush=True)
 
 
 @pytest.fixture(scope="module")
@@ -60,6 +250,108 @@ def installed_adapter_site(tmp_path_factory):
     )
     assert installed.returncode == 0, (installed.stdout, installed.stderr)
     return site
+
+
+@pytest.fixture(scope="module")
+def counter_adapter_site(tmp_path_factory):
+    uv = os.environ.get("UV") or shutil.which("uv")
+    assert uv
+    root = tmp_path_factory.mktemp("counter-package")
+    source = ROOT / "examples/counter-adapter"
+    subprocess.run(
+        [uv, "build", "--wheel", str(source), "-o", str(root)],
+        check=True,
+        capture_output=True,
+        timeout=90,
+    )
+    (wheel,) = root.glob("*.whl")
+    site = root / "site"
+    subprocess.run(
+        [uv, "pip", "install", "--no-deps", "--offline", "--target", str(site), str(wheel)],
+        check=True,
+        capture_output=True,
+        timeout=30,
+    )
+    subprocess.run(
+        ["docker", "build", "-t", "faultline-counter:0.1.0", str(source)],
+        check=True,
+        capture_output=True,
+        timeout=90,
+    )
+    return site
+
+
+@pytest.mark.parametrize(
+    "scenario_name,variant,expected,total",
+    [
+        ("lost-response.yaml", "unsafe", "FAIL", 14),
+        ("lost-response.yaml", "correct", "PASS", 7),
+        ("generated.yaml", "correct", "PASS", None),
+    ],
+)
+def test_independent_counter_adapter_without_core_changes(
+    tmp_path, counter_adapter_site, scenario_name, variant, expected, total
+):
+    command = [
+        sys.executable,
+        "-m",
+        "faultline",
+        "--output",
+        str(tmp_path),
+        "--format",
+        "json",
+        "--project",
+        str(ROOT / "examples/counter-adapter/faultline.project.yaml"),
+    ]
+    result = subprocess.run(
+        [*command, "run", scenario_name, "--variant", variant],
+        env=dict(os.environ, PYTHONPATH=str(counter_adapter_site)),
+        capture_output=True,
+        text=True,
+        timeout=120,
+    )
+    assert result.returncode == (1 if expected == "FAIL" else 0), (result.stdout, result.stderr)
+    path = Path(json.loads(result.stdout)["artifact_paths"][0])
+    manifest, report = read_bundle(path)
+    assert manifest["adapter"]["adapter_id"] == "counter_example"
+    assert report["verdict"] == expected and report["cleanup"]["complete"]
+    snapshot = json.loads((path / "snapshots/final.json").read_text())
+    if total is None:
+        plan = json.loads((path / "plan.json").read_text())
+        operations = plan["scenario"]["operations"]
+        assert len(operations) == 3
+        assert plan["generators"][0]["prng"] == "counter-sha256-v1"
+        assert plan["generators"][0]["version"] == 1
+        assert plan["scenario"]["generators"] == []
+        total = sum(op["request"]["json"]["delta"] for op in operations)
+        assert len(snapshot["records"]["increments"]) == 3
+    assert snapshot["records"]["counter"] == [{"total": total}]
+    assert set(snapshot["records"]) == {"counter", "increments"}
+    # Offline reporting cannot import this separately installed adapter.
+    result = subprocess.run(
+        [sys.executable, "-m", "faultline", "report", str(path)],
+        env={k: v for k, v in os.environ.items() if k != "PYTHONPATH"},
+        capture_output=True,
+        text=True,
+        timeout=15,
+    )
+    assert result.returncode == (1 if expected == "FAIL" else 0)
+    print(f"external counter/{variant}: {expected}, total={total}, {path}", flush=True)
+
+
+def test_builtin_generated_workload_has_materialized_authoritative_effects(
+    tmp_path, docker_connection
+):
+    client, info = docker_connection
+    scenario = load_scenario(ROOT / "examples/orders/generated.yaml")
+    path, report = run_one(scenario, "correct", tmp_path, client=client, platform_info=info)
+    assert report["verdict"] == "PASS" and report["cleanup"]["complete"]
+    plan = json.loads((path / "plan.json").read_text())
+    final = json.loads((path / "snapshots/final.json").read_text())
+    operations = plan["scenario"]["operations"]
+    assert len(final["records"]["orders"]) == len(operations) == 3
+    assert plan["generators"][0]["prng"] == "sha256-counter-v1"
+    assert sum(row["amount_minor"] for row in final["records"]["ledger"]) == 600000
 
 
 @pytest.mark.parametrize(
@@ -207,6 +499,34 @@ def test_isolation_and_real_payload_conflict(tmp_path, scenario, docker_connecti
         for network in env.networks.values():
             network.reload()
             assert network.attrs["Internal"]
+        app_networks = env.containers["application"].attrs["NetworkSettings"]["Networks"]
+        assert set(app_networks) == {env.networks[name].name for name in ("client", "dependency")}
+        proxy_networks = env.containers["proxy"].attrs["NetworkSettings"]["Networks"]
+        admin_ip = proxy_networks[env.networks["control"].name]["IPAddress"]
+        data_ip = proxy_networks[env.networks["dependency"].name]["IPAddress"]
+        database_ip = env.containers["database"].attrs["NetworkSettings"]["Networks"][
+            env.networks["storage"].name
+        ]["IPAddress"]
+        probe = """import socket,sys,json
+for host,port in json.loads(sys.argv[1]):
+    try:
+        connection=socket.create_connection((host,port),timeout=0.3)
+    except OSError:
+        continue
+    connection.close()
+    raise AssertionError('forbidden direct connection succeeded')
+"""
+        blocked = env.containers["application"].exec_run(
+            [
+                "python",
+                "-c",
+                probe,
+                json.dumps(
+                    [[admin_ip, 8474], [data_ip, 8474], [database_ip, 5432], ["database", 5432]]
+                ),
+            ]
+        )
+        assert blocked.exit_code == 0, blocked.output
         request = {
             "method": "POST",
             "path": "/orders",
@@ -239,6 +559,51 @@ def test_isolation_and_real_payload_conflict(tmp_path, scenario, docker_connecti
         assert env.cleanup()["complete"]
     assert before_containers <= {c.id for c in client.containers.list(all=True)}
     assert before_networks <= {n.id for n in client.networks.list()}
+
+
+def test_proxy_disable_breaks_existing_and_new_database_connections(
+    tmp_path, scenario, docker_connection
+):
+    client, info = docker_connection
+    bundle = Bundle(tmp_path, scenario, "correct")
+    env = Environment(client, bundle, info["images"])
+    results = []
+    try:
+        env.provision()
+        bundled_adapter().prepare(env, "correct")
+        env.start_application("correct")
+        env.wait_application_ready()
+        app = env.containers["application"]
+        script = (
+            "from faultline.orders import connect; c=connect(); c.execute('SELECT pg_sleep(4)')"
+        )
+        thread = threading.Thread(
+            target=lambda: results.append(app.exec_run(["python", "-c", script])), daemon=True
+        )
+        thread.start()
+        deadline = time.monotonic() + 5
+        while time.monotonic() < deadline:
+            state = env.call("observer", "registry", "", timeout=5)
+            if state["application_sessions"]:
+                break
+            time.sleep(0.05)
+        assert state["application_sessions"] > 0
+        disabled = env.call("worker", "proxy", json.dumps({"action": "disable"}), timeout=5)
+        assert disabled["acknowledged"] and disabled["configuration"]["enabled"] is False
+        thread.join(timeout=3)
+        assert not thread.is_alive() and results[0].exit_code != 0
+        fresh = app.exec_run(
+            ["python", "-c", "from faultline.orders import connect; connect().execute('SELECT 1')"]
+        )
+        assert fresh.exit_code != 0
+        enabled = env.call("worker", "proxy", json.dumps({"action": "enable"}), timeout=5)
+        assert enabled["acknowledged"] and enabled["configuration"]["enabled"] is True
+        healed = app.exec_run(
+            ["python", "-c", "from faultline.orders import connect; connect().execute('SELECT 1')"]
+        )
+        assert healed.exit_code == 0, healed.output
+    finally:
+        assert env.cleanup()["complete"]
 
 
 def test_malformed_adapter_finding_cannot_pass_real_purchase(
@@ -312,7 +677,7 @@ def test_project_resources_images_and_verdicts(
             scenario, variant, tmp_path, client=client, platform_info=info, project=project
         )
         assert report["verdict"] == verdict, report["diagnostics"]
-        assert set(inspected) == {"application", "database", "worker", "observer"}
+        assert set(inspected) == {"application", "database", "worker", "observer", "proxy"}
         assert report["cleanup"]["complete"]
         assert report["coverage"]["required_applied"] == 1
         manifest, _ = read_bundle(path)
@@ -535,6 +900,109 @@ def test_sigkill_recovery_preserves_other_runs_and_original_evidence(
         assert protected.cleanup()["complete"]
 
 
+@pytest.mark.parametrize(("kind", "role"), [("network", "client"), ("container", "database")])
+def test_sigkill_between_docker_creation_and_id_recording(tmp_path, docker_connection, kind, role):
+    client, _info = docker_connection
+    output = tmp_path / "interrupted-create"
+    marker = tmp_path / "created.json"
+    # This marker belongs only to the test: recovery cannot read the returned ID from it.
+    script = """
+import json, sys, time
+from pathlib import Path
+from faultline.environment import Environment
+from faultline.engine import run_one
+from faultline.models import load_scenario
+from faultline.artifacts import atomic_json
+output, marker, wanted_kind, wanted_role, scenario = sys.argv[1:]
+original = Environment.record
+def pause(self, kind, resource, role):
+    if (kind, role) == (wanted_kind, wanted_role):
+        atomic_json(Path(marker), {'id': resource.id, 'run_id': self.bundle.run_id})
+        time.sleep(60)
+    original(self, kind, resource, role)
+Environment.record = pause
+run_one(load_scenario(Path(scenario)), 'correct', Path(output))
+"""
+    command = [sys.executable, "-m", "faultline", "--output", str(output), "--format", "json"]
+    child = subprocess.Popen(
+        [
+            sys.executable,
+            "-c",
+            script,
+            str(output),
+            str(marker),
+            kind,
+            role,
+            str(ROOT / "examples/orders/control.yaml"),
+        ],
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+    )
+    try:
+        until = time.monotonic() + 40
+        while not marker.exists():
+            assert child.poll() is None, child.communicate(timeout=1)
+            assert time.monotonic() < until, "create boundary was not reached"
+            time.sleep(0.05)
+        created = json.loads(marker.read_text())
+        manifest_path = output / "runs" / created["run_id"] / "manifest.json"
+        manifest = json.loads(manifest_path.read_text())
+        assert created["id"] not in {r["id"] for r in manifest["resources"]}
+        intent = next(i for i in manifest["creation_intents"] if i["role"] == role)
+        collection = client.containers if kind == "container" else client.networks
+        assert collection.get(intent["name"]).id == created["id"]
+        busy = subprocess.run(
+            [*command, "clean", "--run", created["run_id"]],
+            capture_output=True,
+            text=True,
+            timeout=15,
+        )
+        assert busy.returncode == 2
+        child.kill()
+        child.communicate(timeout=10)
+        assert child.returncode == -signal.SIGKILL
+        original = {
+            p.relative_to(manifest_path.parent): p.read_bytes()
+            for p in manifest_path.parent.rglob("*")
+            if p.is_file()
+        }
+        for _ in range(2):
+            cleaned = subprocess.run(
+                [*command, "clean", "--run", created["run_id"]],
+                capture_output=True,
+                text=True,
+                timeout=30,
+            )
+            assert cleaned.returncode == 0, (cleaned.stdout, cleaned.stderr)
+            receipt = json.loads(Path(json.loads(cleaned.stdout)["artifact_paths"][0]).read_text())
+            assert receipt["reconciled_resources"] == [
+                {"kind": kind, "role": role, "id": created["id"]}
+            ]
+        binding = json.loads(
+            (output / "cleanup/bindings" / f"{created['run_id']}.json").read_text()
+        )
+        assert binding["resources"][0]["id"] == created["id"]
+        assert original == {
+            p.relative_to(manifest_path.parent): p.read_bytes()
+            for p in manifest_path.parent.rglob("*")
+            if p.is_file()
+        }
+        filters = {"label": f"io.faultline.run={created['run_id']}"}
+        assert not client.containers.list(all=True, filters=filters)
+        assert not client.networks.list(filters=filters)
+        print(f"creation gap {kind}/{role}: recovered {created['id']}, run={created['run_id']}")
+    finally:
+        if child.poll() is None:
+            child.kill()
+            child.communicate(timeout=10)
+        if (output / "runs").exists():
+            cleanup = subprocess.run(
+                [*command, "clean", "--stale"], capture_output=True, text=True, timeout=30
+            )
+            assert cleanup.returncode == 0, (cleanup.stdout, cleanup.stderr)
+
+
 def test_observation_deadline_interrupts_real_helper_and_cleans(
     monkeypatch, tmp_path, scenario, docker_connection
 ):
@@ -630,7 +1098,7 @@ def test_cleanup_deadline_preserves_real_leftovers_for_later_recovery(
         assert report["verdict"] == "ERROR"
         assert all(f["status"] == "PASS" for f in report["invariants"])
         assert not report["cleanup"]["complete"]
-        assert len(report["cleanup"]["remaining_resources"]) == 6
+        assert len(report["cleanup"]["remaining_resources"]) == 9
         assert any(d.get("stage") == "cleanup" for d in report["diagnostics"])
         filters = {"label": f"io.faultline.run={report['run_id']}"}
         assert client.containers.list(all=True, filters=filters)

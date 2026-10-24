@@ -4,25 +4,18 @@ import json
 import os
 import re
 import stat
+from copy import deepcopy
 from pathlib import Path
 from types import SimpleNamespace
-from uuid import UUID, uuid4
+from uuid import uuid4
 
 from faultline.artifacts import atomic_json, utc_now
 from faultline.environment import Environment
+from faultline.models import digest
+from faultline.ownership import canonical_uuid, validate_intents, validate_resources
 
 MAX_MANIFEST_BYTES = 1048576
 MAX_RUNS = 1000
-ROLES = {
-    "container": {"application", "database", "observer", "worker"},
-    "network": {"client", "storage"},
-}
-
-
-def canonical_uuid(value):
-    if not isinstance(value, str) or str(UUID(value)) != value:
-        raise ValueError("Expected a canonical run/ownership UUID")
-    return value
 
 
 def plain_directory(path: Path):
@@ -40,12 +33,8 @@ def unique_object(pairs):
     return result
 
 
-def read_ownership(output: Path, run_id: str) -> dict:
-    canonical_uuid(run_id)
-    plain_directory(output / "runs")
-    root = output / "runs" / run_id
-    plain_directory(root)
-    descriptor = os.open(root / "manifest.json", os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
+def read_record(path):
+    descriptor = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
     with os.fdopen(descriptor, "rb") as stream:
         metadata = os.fstat(stream.fileno())
         if not stat.S_ISREG(metadata.st_mode) or metadata.st_size > MAX_MANIFEST_BYTES:
@@ -53,7 +42,15 @@ def read_ownership(output: Path, run_id: str) -> dict:
         raw = stream.read(MAX_MANIFEST_BYTES + 1)
     if len(raw) > MAX_MANIFEST_BYTES:
         raise ValueError("Ownership manifest too large")
-    manifest = json.loads(raw, object_pairs_hook=unique_object)
+    return json.loads(raw, object_pairs_hook=unique_object)
+
+
+def read_ownership(output: Path, run_id: str) -> dict:
+    canonical_uuid(run_id)
+    plain_directory(output / "runs")
+    root = output / "runs" / run_id
+    plain_directory(root)
+    manifest = read_record(root / "manifest.json")
     if not isinstance(manifest, dict):
         raise ValueError("Expected an ownership manifest object")
     if manifest.get("execution_root") != str(output.resolve()):
@@ -64,7 +61,7 @@ def read_ownership(output: Path, run_id: str) -> dict:
     if (
         type(manifest.get("bundle_schema_version")) is not int
         or manifest["bundle_schema_version"] != 1
-        or manifest.get("implementation_profile") != "milestone1"
+        or manifest.get("implementation_profile") not in {"milestone1", "experiment_engine_v1"}
         or manifest.get("run_id") != run_id
     ):
         raise ValueError("Unsupported ownership manifest version, profile, or run identity")
@@ -78,24 +75,8 @@ def read_ownership(output: Path, run_id: str) -> dict:
             or manifest["project"].get("project_id") != project_id
         ):
             raise ValueError("Recorded project identity disagrees with the ownership label")
-    resources = manifest.get("resources")
-    if not isinstance(resources, list) or len(resources) > 6:
-        raise ValueError("Invalid milestone1 resource inventory")
-    ids, roles = set(), set()
-    for record in resources:
-        if not isinstance(record, dict) or set(record) != {"kind", "id", "role"}:
-            raise ValueError("Malformed resource ownership record")
-        kind, resource_id, role = record["kind"], record["id"], record["role"]
-        if not all(isinstance(value, str) for value in (kind, resource_id, role)):
-            raise ValueError("Resource ownership fields must be strings")
-        if kind not in ROLES or role not in ROLES[kind]:
-            raise ValueError("Unsupported resource kind or role")
-        if not re.fullmatch(r"[0-9a-f]{64}", resource_id):
-            raise ValueError("Recovery requires full immutable Docker resource IDs")
-        if resource_id in ids or (kind, role) in roles:
-            raise ValueError("Duplicate resource identity or role")
-        ids.add(resource_id)
-        roles.add((kind, role))
+    validate_resources(manifest.get("resources"))
+    validate_intents(manifest.get("creation_intents", []), run_id)
     return manifest
 
 
@@ -120,13 +101,45 @@ def recovery_manifests(output: Path, run_id: str | None) -> list[dict]:
     return [read_ownership(output, value) for value in sorted(run_ids)]
 
 
+def binding_record(root, manifest):
+    """Reusing the first recorded ID prevents rebinding a reused name on a later cleanup."""
+    path = root / f"{manifest['run_id']}.json"
+    expected = {
+        "binding_schema_version": 1,
+        "run_id": manifest["run_id"],
+        "ownership_nonce": manifest["ownership_nonce"],
+        "manifest_hash": digest(manifest),
+    }
+    if not path.exists() and not path.is_symlink():
+        return path, {**expected, "resources": []}
+    record = read_record(path)
+    if (
+        not isinstance(record, dict)
+        or set(record) != {*expected, "resources"}
+        or type(record.get("binding_schema_version")) is not int
+        or any(record.get(key) != value for key, value in expected.items())
+    ):
+        raise ValueError("Recovery binding does not match the original ownership manifest")
+    validate_resources(record["resources"])
+    validate_resources([*manifest["resources"], *record["resources"]])
+    pending = {(i["kind"], i["role"]) for i in manifest.get("creation_intents", [])}
+    if any((r["kind"], r["role"]) not in pending for r in record["resources"]):
+        raise ValueError("Recovery binding lacks a recorded creation intent")
+    return path, record
+
+
 def recover(output: Path, manifests: list[dict], client) -> tuple[list[dict], list[Path]]:
     """Caller holds the same lock as execution, through validation, deletion, and receipts."""
     receipt_root = output / "cleanup"
     receipt_root.mkdir(exist_ok=True)
     plain_directory(receipt_root)
+    binding_root = receipt_root / "bindings"
+    binding_root.mkdir(exist_ok=True)
+    plain_directory(binding_root)
+    # Validate every saved binding before mutating any selected Docker resource.
+    bindings = [binding_record(binding_root, manifest) for manifest in manifests]
     results, paths = [], []
-    for manifest in manifests:
+    for manifest, (binding_path, binding) in zip(manifests, bindings, strict=True):
         run_id = manifest["run_id"]
         receipt = {
             "cleanup_schema_version": 1,
@@ -135,14 +148,40 @@ def recover(output: Path, manifests: list[dict], client) -> tuple[list[dict], li
             "ownership_nonce": manifest["ownership_nonce"],
             "started_at": utc_now(),
             "recorded_resources": manifest["resources"],
+            "creation_intents": manifest.get("creation_intents", []),
+            "binding_record": str(binding_path.relative_to(output)),
             "complete": False,
-            "remaining_resources": manifest["resources"],
+            "remaining_resources": [
+                *manifest["resources"],
+                *binding["resources"],
+                *(
+                    i
+                    for i in manifest.get("creation_intents", [])
+                    if (i["kind"], i["role"])
+                    not in {
+                        (r["kind"], r["role"])
+                        for r in [*manifest["resources"], *binding["resources"]]
+                    }
+                ),
+            ],
         }
         path = receipt_root / f"{receipt['cleanup_id']}.json"
         # Fail before deletion if we cannot write recovery evidence.
         atomic_json(path, receipt)
-        env = Environment(client, SimpleNamespace(manifest=manifest, run_id=run_id), {})
+        working = deepcopy(manifest)
+        working["resources"].extend(binding["resources"])
+
+        def persist(record, binding=binding, binding_path=binding_path):
+            updated = {**binding, "resources": [*binding["resources"], record]}
+            # On any failure, do not grant this candidate mutation rights in memory.
+            atomic_json(binding_path, updated)
+            binding.update(updated)
+
+        env = Environment(
+            client, SimpleNamespace(manifest=working, run_id=run_id), {}, persist_binding=persist
+        )
         receipt.update(env.cleanup())
+        receipt["reconciled_resources"] = binding["resources"]
         receipt["completed_at"] = utc_now()
         atomic_json(path, receipt)
         results.append(receipt)

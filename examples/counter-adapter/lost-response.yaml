@@ -1,0 +1,52 @@
+{
+  "schema_version": 1,
+  "id": "counter_retry",
+  "adapter_profile": "counter_v1",
+  "fixture": "empty_counter",
+  "seed": 17,
+  "operations": [
+    {
+      "id": "increment_a",
+      "kind": "increment",
+      "logical_id": "add-a",
+      "route": "counter_api",
+      "request": {
+        "method": "POST",
+        "path": "/increments",
+        "headers": {
+          "Idempotency-Key": "add-a"
+        },
+        "json": {
+          "intent": "add-a",
+          "delta": 7
+        }
+      },
+      "timeout_ms": 1000,
+      "retry": {
+        "max_attempts": 2,
+        "on": [
+          "timeout"
+        ],
+        "backoff_ms": [
+          100
+        ]
+      }
+    }
+  ],
+  "faults": [
+    {
+      "id": "hide",
+      "kind": "response_suppress",
+      "target": "counter_api",
+      "trigger": {
+        "event": "upstream_response_complete",
+        "operation_id": "increment_a",
+        "attempt": 1,
+        "status": 201
+      }
+    }
+  ],
+  "invariants": [
+    "counter.exactly_once"
+  ]
+}

@@ -1,7 +1,9 @@
 import json
 import socket
 import struct
+import threading
 from http.client import HTTPResponse
+from unittest.mock import Mock
 
 import pytest
 
@@ -69,3 +71,59 @@ def test_closing_session_closes_owning_http_response_without_finalizer_error():
         response.close()
         left.close()
         right.close()
+
+
+def test_protocol_multiplexes_reversed_results_by_command_identity():
+    left, right = socket.socketpair()
+    api = Mock()
+    api.exec_create.return_value = {"Id": "owned-exec"}
+    api.exec_start.return_value = left
+    server_errors = []
+
+    def server():
+        try:
+            right.sendall(
+                frame(
+                    json.dumps({"protocol_version": 2, "ready": True, "max_in_flight": 32}).encode()
+                    + b"\n"
+                )
+            )
+            with right.makefile("rb") as stream:
+                messages = [json.loads(stream.readline()) for _ in range(2)]
+                for message in reversed(messages):
+                    common = {"protocol_version": 2, "request_id": message["request_id"]}
+                    for response in (
+                        {**common, "accepted": True},
+                        {
+                            **common,
+                            "result": {
+                                "outcome": "http_response",
+                                "status": 201,
+                                "body": message["request"],
+                            },
+                        },
+                    ):
+                        right.sendall(frame(json.dumps(response).encode() + b"\n"))
+        except Exception as exc:
+            server_errors.append(exc)
+
+    background = threading.Thread(target=server, daemon=True)
+    background.start()
+    worker = WorkerSession(api, "owned-worker")
+    results = {}
+    threads = [
+        threading.Thread(target=lambda i=i: results.update({i: worker.request({"value": i}, 2)}))
+        for i in range(2)
+    ]
+    try:
+        for thread in threads:
+            thread.start()
+        for thread in threads:
+            thread.join(timeout=3)
+            assert not thread.is_alive()
+        assert not server_errors
+        assert {i: result["body"]["value"] for i, result in results.items()} == {0: 0, 1: 1}
+    finally:
+        right.close()
+        worker.close()
+        background.join(timeout=2)

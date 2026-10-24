@@ -1,4 +1,5 @@
 import json
+from pathlib import Path
 
 import pytest
 
@@ -55,3 +56,66 @@ def test_budget_is_enforced_before_append(tmp_path, scenario):
     with pytest.raises(OSError, match="budget"):
         bundle.event("huge", {"data": "x" * 101})
     assert bundle.sequence == 0
+
+
+def test_signal_after_durable_append_does_not_duplicate_sequence(monkeypatch, tmp_path, scenario):
+    import os
+
+    bundle = Bundle(tmp_path, scenario, "correct")
+    fsync = os.fsync
+
+    def interrupt(descriptor):
+        fsync(descriptor)
+        raise KeyboardInterrupt
+
+    with monkeypatch.context() as patch:
+        patch.setattr("faultline.artifacts.os.fsync", interrupt)
+        with pytest.raises(KeyboardInterrupt):
+            bundle.event("ready", {})
+    assert bundle.sequence == 1
+    bundle.event("cleanup", {})
+    bundle.finalize(
+        {
+            "verdict": "INCONCLUSIVE",
+            "invariants": [],
+            "diagnostics": [],
+            "coverage": {"required_applied": 0, "required_total": 1},
+            "cleanup": {"complete": True},
+        }
+    )
+    assert read_bundle(bundle.path)[1]["last_sequence"] == 2
+
+
+def test_partial_append_is_preserved_and_never_finalized(monkeypatch, tmp_path, scenario):
+    bundle = Bundle(tmp_path, scenario, "correct")
+    original_open = Path.open
+
+    class BrokenWriter:
+        def __enter__(self):
+            self.stream = original_open(bundle.path / "history.ndjson", "ab")
+            return self
+
+        def write(self, raw):
+            self.stream.write(raw[:10])
+            raise OSError("partial disk write")
+
+        def __exit__(self, *args):
+            self.stream.close()
+
+    def opened(path, mode="r", *args, **kwargs):
+        if path.name == "history.ndjson" and mode == "ab":
+            return BrokenWriter()
+        return original_open(path, mode, *args, **kwargs)
+
+    with monkeypatch.context() as patch:
+        patch.setattr(Path, "open", opened)
+        with pytest.raises(OSError, match="partial disk write"):
+            bundle.event("ready", {})
+    partial = (bundle.path / "history.ndjson").read_bytes()
+    assert len(partial) == 10
+    with pytest.raises(OSError, match="incomplete history"):
+        bundle.event("cleanup", {})
+    with pytest.raises(OSError, match="Incomplete history"):
+        bundle.finalize({})
+    assert (bundle.path / "history.ndjson").read_bytes() == partial
+    assert not (bundle.path / "report.json").exists()

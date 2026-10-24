@@ -19,7 +19,10 @@ def test_success_and_lost_final_response_are_equivalent(scenario, baseline, corr
     }
     for outcome in ("http_response", "timeout"):
         results = verify(
-            scenario, baseline, correct_snapshot, [{"outcome": outcome, "upstream": witness}]
+            scenario,
+            baseline,
+            correct_snapshot,
+            [{"attempt_id": "purchase_a/1", "outcome": outcome, "upstream": witness}],
         )
         assert set(statuses(results).values()) == {"PASS"}
 
@@ -78,7 +81,12 @@ def test_success_response_for_nonexistent_order_fails(scenario, baseline, correc
         scenario,
         baseline,
         correct_snapshot,
-        [{"upstream": {"outcome": "http_response", "status": 201, "body": forged}}],
+        [
+            {
+                "attempt_id": "purchase_a/1",
+                "upstream": {"outcome": "http_response", "status": 201, "body": forged},
+            }
+        ],
     )
     assert statuses(result)["orders.idempotency_contract"] == "FAIL"
 
@@ -86,18 +94,20 @@ def test_success_response_for_nonexistent_order_fails(scenario, baseline, correc
 def test_retry_rejection_is_not_hidden_by_one_committed_order(scenario, baseline, correct_snapshot):
     witnesses = [
         {
+            "attempt_id": "purchase_a/1",
             "upstream": {
                 "outcome": "http_response",
                 "status": 201,
                 "body": correct_snapshot["records"]["orders"][0],
-            }
+            },
         },
         {
+            "attempt_id": "purchase_a/2",
             "upstream": {
                 "outcome": "http_response",
                 "status": 409,
                 "body": {"code": "insufficient_funds", "message": "insufficient_funds"},
-            }
+            },
         },
     ]
     results = verify(scenario, baseline, correct_snapshot, witnesses)

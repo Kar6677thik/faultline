@@ -1,0 +1,29 @@
+{
+  "schema_version": 1,
+  "id": "generated_purchases",
+  "adapter_profile": "orders_v1",
+  "fixture": "standard_wallet",
+  "seed": 42,
+  "operations": [],
+  "invariants": [
+    "orders.at_most_one_debit",
+    "orders.purchase_atomicity",
+    "orders.wallet_conservation",
+    "orders.inventory_conservation",
+    "orders.confirmation_intent",
+    "orders.idempotency_contract",
+    "orders.completed_purchase"
+  ],
+  "concurrency": 2,
+  "generators": [
+    {
+      "id": "generated",
+      "kind": "orders.purchases",
+      "count": 3,
+      "parameters": {
+        "quantity_min": 1,
+        "quantity_max": 1
+      }
+    }
+  ]
+}

@@ -42,6 +42,10 @@ CREATE TABLE idempotency (
     record_id text PRIMARY KEY, account_id text NOT NULL, key text NOT NULL,
     fingerprint text NOT NULL, order_id text NOT NULL
 );
+CREATE TABLE inflight (
+    registration_id text PRIMARY KEY, process_epoch text NOT NULL,
+    backend_pid integer NOT NULL, backend_start timestamptz NOT NULL
+);
 INSERT INTO accounts VALUES ('buyer-a', 1000000);
 INSERT INTO products VALUES ('sku-a', 200000, 10);
 """
@@ -49,8 +53,8 @@ INSERT INTO products VALUES ('sku-a', 200000, 10);
 
 def connect(role: str = "app", *, autocommit: bool = False):
     return psycopg.connect(
-        host="database",
-        port=5432,
+        host=os.environ.get("FL_DB_HOST", "database") if role == "app" else "database",
+        port=int(os.environ.get("FL_DB_PORT", "5432")) if role == "app" else 5432,
         dbname="faultline",
         user=f"fl_{role}",
         password=os.environ[f"FL_{role.upper()}_PASSWORD"],
@@ -79,6 +83,7 @@ def prepare(variant: str) -> dict:
             )
         conn.execute("GRANT USAGE ON SCHEMA public TO fl_app, fl_observer")
         conn.execute("GRANT SELECT, INSERT, UPDATE ON ALL TABLES IN SCHEMA public TO fl_app")
+        conn.execute("GRANT DELETE ON inflight TO fl_app")
         conn.execute("GRANT SELECT ON ALL TABLES IN SCHEMA public TO fl_observer")
         conn.execute("GRANT pg_read_all_stats TO fl_observer")
         conn.execute("ALTER ROLE fl_observer SET default_transaction_read_only = on")
@@ -117,6 +122,33 @@ def snapshot(role: str) -> dict:
         "row_counts": {key: len(value) for key, value in records.items()},
         "content_hash": digest(records),
     }
+
+
+def registry_evidence():
+    with connect("observer") as conn:
+        conn.execute("SET TRANSACTION ISOLATION LEVEL REPEATABLE READ READ ONLY")
+        rows = conn.execute(
+            "SELECT registration_id, process_epoch, backend_pid, backend_start::text, "
+            "EXISTS (SELECT 1 FROM pg_stat_activity a WHERE a.pid = i.backend_pid "
+            "AND a.backend_start = i.backend_start) AS session_alive FROM inflight i "
+            "ORDER BY registration_id"
+        ).fetchall()
+        sessions = conn.execute(
+            "SELECT count(*) AS n FROM pg_stat_activity WHERE usename='fl_app'"
+        ).fetchone()["n"]
+    return {"registrations": rows, "application_sessions": sessions}
+
+
+def clear_stale_registry():
+    # Called only after owned-container exit is confirmed. Recheck database sessions
+    # inside this helper before deleting diagnostic rows; business tables are untouched.
+    with connect("setup") as conn:
+        if conn.execute(
+            "SELECT count(*) AS n FROM pg_stat_activity WHERE usename='fl_app'"
+        ).fetchone()["n"]:
+            raise ValueError("application sessions still active")
+        cleared = conn.execute("DELETE FROM inflight RETURNING registration_id").fetchall()
+    return {"cleared": sorted(row["registration_id"] for row in cleared)}
 
 
 class OrderRequest(BaseModel):
@@ -239,6 +271,16 @@ def transact_order(payload: dict, key: str, variant: str) -> dict:
 
 
 app = FastAPI(docs_url=None, redoc_url=None, openapi_url=None)
+PROCESS_EPOCH = str(uuid4())
+
+
+@app.exception_handler(psycopg.Error)
+async def dependency_error(_request, _exc):
+    # A transport failure says nothing about commit. The caller reuses its identity.
+    return JSONResponse(
+        status_code=503,
+        content={"code": "dependency_unavailable", "message": "Database connection unavailable"},
+    )
 
 
 @app.exception_handler(RequestValidationError)
@@ -260,6 +302,29 @@ def create_order(
     body: OrderRequest, idempotency_key: Annotated[str, Header(min_length=1, max_length=128)]
 ):
     try:
-        return transact_order(body.model_dump(), idempotency_key, os.environ["FL_VARIANT"])
+        # Registration commits before any business mutation. The separate session stays
+        # open until the handler can no longer mutate, including after client timeout.
+        with connect(autocommit=True) as registry:
+            registration = str(uuid4())
+            registry.execute(
+                "INSERT INTO inflight SELECT %s, %s, pid, backend_start FROM pg_stat_activity "
+                "WHERE pid = pg_backend_pid()",
+                (registration, PROCESS_EPOCH),
+            )
+            try:
+                delay = int(os.environ.get("FL_TEST_HANDLER_DELAY_MS", "0"))
+                if not 0 <= delay <= 30000:
+                    raise ValueError("invalid test handler delay")
+                time.sleep(delay / 1000)
+                return transact_order(body.model_dump(), idempotency_key, os.environ["FL_VARIANT"])
+            finally:
+                try:
+                    registry.execute(
+                        "DELETE FROM inflight WHERE registration_id = %s", (registration,)
+                    )
+                except psycopg.Error:
+                    # A broken registry connection cannot establish completion. Leave the
+                    # durable row for post-exit session reconciliation by the observer.
+                    pass
     except Rejection as exc:
         return JSONResponse(status_code=exc.status, content={"code": exc.code, "message": exc.code})

@@ -1,4 +1,4 @@
-"""Runnable order-project subset; parsing never imports an adapter."""
+"""Bounded five-role HTTP/PostgreSQL projects; parsing never imports an adapter."""
 
 from dataclasses import dataclass
 from pathlib import Path, PurePosixPath
@@ -7,8 +7,16 @@ from typing import Annotated, Literal
 from pydantic import Field, model_validator
 
 from faultline import __version__
-from faultline.environment import POSTGRES_IMAGE, RUNTIME_IMAGE
-from faultline.models import Identifier, Limits, Scenario, StrictModel, digest, load_document
+from faultline.environment import POSTGRES_IMAGE, PROXY_IMAGE, RUNTIME_IMAGE
+from faultline.models import (
+    Identifier,
+    Limits,
+    Scenario,
+    StrictModel,
+    digest,
+    load_document,
+    safe_path,
+)
 
 ImageReference = Annotated[
     str,
@@ -42,31 +50,85 @@ class Resources(StrictModel):
 
 
 class Readiness(StrictModel):
-    # Individual timeout/poll overrides are deferred; existing stage budgets apply.
-    check: Literal["postgres_ready", "orders_health", "worker_handshake", "observer_snapshot"]
+    # Stage deadlines may shorten these per-service maxima.
+    check: Identifier
+    timeout_ms: Annotated[int, Field(ge=1, le=300000)] = 10000
+    poll_ms: Annotated[int, Field(ge=1, le=300000)] = 250
+
+
+class SecretReference(StrictModel):
+    secret_ref: Annotated[str, Field(pattern=r"^[A-Za-z_][A-Za-z0-9_]{0,127}$")]
+
+
+EnvironmentValues = dict[
+    Annotated[str, Field(pattern=r"^[A-Za-z_][A-Za-z0-9_]{0,127}$")], str | SecretReference
+]
+
+
+def check_environment(values):
+    if len(values) > 64:
+        raise ValueError("too many environment values")
+    for key, value in values.items():
+        if key.startswith(("FL_", "POSTGRES_", "DOCKER_")) or key in {
+            "PATH",
+            "PYTHONPATH",
+            "PYTHONHOME",
+            "LD_PRELOAD",
+        }:
+            raise ValueError("engine-owned environment variable cannot be overridden")
+        if isinstance(value, str) and (len(value) > 4096 or "\x00" in value):
+            raise ValueError("environment value is oversized or contains NUL")
 
 
 class Service(StrictModel):
     id: Identifier
-    role: Literal["application", "postgres", "worker", "observer"]
+    role: Literal["application", "postgres", "worker", "observer", "proxy"]
     image: ImageReference
-    ports: Annotated[list[Annotated[int, Field(ge=1, le=65535)]], Field(max_length=1)]
+    ports: Annotated[list[Annotated[int, Field(ge=1, le=65535)]], Field(max_length=16)]
     resources: Resources
     readiness: Readiness
-    environment: Annotated[dict[str, str], Field(max_length=0)] = Field(default_factory=dict)
-    writable_paths: Annotated[list[str], Field(max_length=0)] = Field(default_factory=list)
+    environment: EnvironmentValues = Field(default_factory=dict)
+    writable_paths: Annotated[list[str], Field(max_length=8)] = Field(default_factory=list)
+
+    @model_validator(mode="after")
+    def safe_settings(self):
+        check_environment(self.environment)
+        if len(set(self.writable_paths)) != len(self.writable_paths):
+            raise ValueError("duplicate writable path")
+        for value in self.writable_paths:
+            path = PurePosixPath(value)
+            if (
+                not path.is_absolute()
+                or str(path) != value
+                or ".." in path.parts
+                or path.parts[1] not in {"data", "cache"}
+            ):
+                raise ValueError("ephemeral writable paths must be beneath /data or /cache")
+        return self
 
 
 class Route(StrictModel):
-    id: Literal["orders_api"]
-    service: Literal["application"]
-    port: Annotated[int, Field(ge=8000, le=8000)]
-    base_path: Literal["/"]
+    id: Identifier
+    service: Identifier
+    port: Annotated[int, Field(ge=1, le=65535)]
+    base_path: str
+
+    @model_validator(mode="after")
+    def path(self):
+        safe_path(self.base_path)
+        if "?" in self.base_path:
+            raise ValueError("route base path cannot contain a query")
+        return self
 
 
 class Variant(StrictModel):
     application_image: ImageReference
-    environment: Annotated[dict[str, str], Field(max_length=0)] = Field(default_factory=dict)
+    environment: EnvironmentValues = Field(default_factory=dict)
+
+    @model_validator(mode="after")
+    def safe_environment(self):
+        check_environment(self.environment)
+        return self
 
 
 class ProjectLimits(StrictModel):
@@ -79,9 +141,9 @@ class ProjectLimits(StrictModel):
     cleanup_ms: StageCeiling | None = None
     total_ms: Annotated[int, Field(ge=1, le=900000)] | None = None
     artifact_bytes: Annotated[int, Field(ge=65536, le=52428800)] | None = None
-    max_operations: Annotated[int, Field(ge=1, le=1)] | None = None
-    max_attempts: Annotated[int, Field(ge=1, le=5)] | None = None
-    max_faults: Annotated[int, Field(ge=0, le=1)] | None = None
+    max_operations: Annotated[int, Field(ge=1, le=1000)] | None = None
+    max_attempts: Annotated[int, Field(ge=1, le=5000)] | None = None
+    max_faults: Annotated[int, Field(ge=0, le=32)] | None = None
 
     @model_validator(mode="before")
     @classmethod
@@ -95,12 +157,11 @@ class Project(StrictModel):
     schema_version: Annotated[int, Field(ge=1, le=1)]
     project_id: Identifier
     adapter: AdapterSelection
-    services: Annotated[list[Service], Field(min_length=4, max_length=4)]
-    routes: Annotated[list[Route], Field(min_length=1, max_length=1)]
-    # This profile requires explicit known variants. General/default variants are deferred.
-    variants: Annotated[
-        dict[Literal["unsafe", "correct"], Variant], Field(min_length=1, max_length=2)
-    ]
+    services: Annotated[list[Service], Field(min_length=5, max_length=5)]
+    routes: Annotated[list[Route], Field(min_length=1, max_length=16)]
+    variants: Annotated[dict[Identifier, Variant], Field(max_length=32)] = Field(
+        default_factory=dict
+    )
     scenario_paths: Annotated[list[str], Field(max_length=100)] = Field(default_factory=list)
     limits: ProjectLimits = Field(default_factory=ProjectLimits)
 
@@ -111,17 +172,36 @@ class Project(StrictModel):
             "database": ("postgres", [5432], "postgres_ready", POSTGRES_IMAGE),
             "worker": ("worker", [], "worker_handshake", RUNTIME_IMAGE),
             "observer": ("observer", [], "observer_snapshot", RUNTIME_IMAGE),
+            "proxy": ("proxy", [8666, 8474], "proxy_ready", PROXY_IMAGE),
         }
-        if {service.id for service in self.services} != expected.keys():
-            raise ValueError("supported project requires application, database, worker, observer")
+        if {service.role for service in self.services} != {
+            "application",
+            "postgres",
+            "worker",
+            "observer",
+            "proxy",
+        } or len({service.id for service in self.services}) != len(self.services):
+            raise ValueError(
+                "supported project requires application, database, worker, observer, proxy"
+            )
         for service in self.services:
-            role, ports, readiness, image = expected[service.id]
-            if (service.role, service.ports, service.readiness.check) != (role, ports, readiness):
+            role, ports, readiness, image = expected[
+                "database" if service.role == "postgres" else service.role
+            ]
+            if service.role != role or len(set(service.ports)) != len(service.ports):
                 raise ValueError(
                     "service role, ports, or readiness does not match the order profile"
                 )
-            if image is not None and service.image != image:
-                raise ValueError("database and helper images must match the bundled pinned profile")
+            if service.role != "application" and service.ports != ports:
+                raise ValueError("dependency/helper ports must implement the engine contract")
+        application = next(s for s in self.services if s.role == "application")
+        if len({route.id for route in self.routes}) != len(self.routes):
+            raise ValueError("duplicate route identifier")
+        for route in self.routes:
+            if route.service != application.id or route.port not in application.ports:
+                raise ValueError("route must use a declared application port")
+        if not self.variants:
+            self.variants = {"default": Variant(application_image=application.image)}
         if len(set(self.scenario_paths)) != len(self.scenario_paths):
             raise ValueError("duplicate scenario_paths")
         for value in self.scenario_paths:
@@ -153,15 +233,12 @@ class Project(StrictModel):
             else:
                 defaults[name] = min(defaults[name], ceiling)
         scenario = Scenario.model_validate({**raw, "limits": {**defaults, **explicit}})
-        counts = {
-            "max_operations": len(scenario.operations),
-            "max_attempts": sum(operation.retry.max_attempts for operation in scenario.operations),
-            "max_faults": len(scenario.faults),
-        }
-        if any(count > ceilings.get(name, count) for name, count in counts.items()):
-            raise ValueError(
-                "scenario operation, attempt, or fault count exceeds the project ceiling"
-            )
+        if any(
+            s.readiness.timeout_ms > scenario.limits.provisioning_ms
+            or s.readiness.poll_ms > s.readiness.timeout_ms
+            for s in self.services
+        ):
+            raise ValueError("service readiness must fit provisioning budget")
         return scenario
 
     def configuration(self):

@@ -128,7 +128,7 @@ def doctor(ctx: typer.Context):
 
 @app.command()
 def validate(ctx: typer.Context, scenario: str):
-    """Validate the supported M1 scenario subset without starting Docker."""
+    """Validate and materialize an adapter scenario without starting Docker."""
     try:
         value, project = experiment_inputs(ctx, scenario)
         adapter, identity = resolve_adapter(project, value)
@@ -140,8 +140,8 @@ def validate(ctx: typer.Context, scenario: str):
         0,
         {
             "scenario_id": value.id,
-            "profile": "milestone1",
-            "operations": 1,
+            "profile": value.adapter_profile,
+            "operations": len(value.all_operations),
             "faults": len(value.faults),
             "adapter": adapter.description.model_dump(),
             "adapter_identity": identity,
@@ -157,11 +157,12 @@ def run(
     ctx: typer.Context,
     scenario: str,
     variant: Annotated[
-        str | None, typer.Option(help="unsafe or correct; may omit for one project variant")
+        str | None,
+        typer.Option(help="declared application variant; may omit for a single-variant project"),
     ] = None,
     repeat: Annotated[int, typer.Option(min=1, max=100)] = 1,
 ):
-    """Run one purchase from a fresh fixture; repeats never reuse application storage."""
+    """Run a bounded experiment; repetitions never reuse application storage."""
     try:
         value, project = experiment_inputs(ctx, scenario)
         if project is not None:

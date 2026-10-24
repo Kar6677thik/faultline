@@ -4,6 +4,7 @@ import pytest
 import yaml
 from pydantic import ValidationError
 
+from faultline.adapters import AdapterError, bundled_adapter
 from faultline.models import Scenario, load_scenario
 
 
@@ -28,7 +29,7 @@ def test_unsafe_yaml_is_rejected(tmp_path, document):
     [
         lambda s: s.update(schema_version=True),
         lambda s: s.update(concurrency=True),
-        lambda s: s.update(concurrency=2),
+        lambda s: s.update(concurrency=33),
         lambda s: s.update(unknown_field=True),
         lambda s: s.update(seed="42"),
         lambda s: s["operations"][0]["request"].update(path="https://production.example/orders"),
@@ -42,8 +43,8 @@ def test_unsafe_yaml_is_rejected(tmp_path, document):
 def test_unsupported_or_ambiguous_plans_rejected(scenario, mutate):
     data = deepcopy(scenario.model_dump(by_alias=True))
     mutate(data)
-    with pytest.raises(ValidationError):
-        Scenario.model_validate(data)
+    with pytest.raises((ValidationError, AdapterError, ValueError)):
+        bundled_adapter().validate(Scenario.model_validate(data))
 
 
 def test_yaml_on_is_a_string_key_and_plan_is_stable(scenario):

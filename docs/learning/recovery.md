@@ -4,7 +4,7 @@
 
 Imagine an experiment running on a table. The person supervising it suddenly leaves. The equipment does not necessarily stop. Before packing up, a replacement supervisor must know that nobody is still using the table, which equipment belongs to this experiment, and what was already written down.
 
-Faultline's coordinator is the supervisor. Docker containers are the equipment. The operating-system lock is the table's key. The run manifest is the equipment list. Cleanup receipts record the packing-up work.
+Faultline's coordinator is the supervisor. Docker containers are the equipment. The operating-system lock is the table's key. The run manifest is the equipment list. Cleanup receipts record the packing-up work. New runs also save creation tickets before asking Docker to make equipment, so a lost creation receipt can be [reconciled safely](creation-recovery.md).
 
 ## Why containers survive a hard kill
 
@@ -39,13 +39,13 @@ Do not delete `execution.lock` to bypass a refusal. A running process may still 
 
 1. **Acquire the lock.** Cleanup takes the same output-root lock as `run_one`. If another supported operation holds it, cleanup returns exit 2 before contacting Docker.
 2. **Read recorded bundles.** `--run` selects one UUID. `--stale` scans at most 1,000 entries directly under `runs/`, including completed bundles. It never recursively hunts for containers or scans Docker by name.
-3. **Validate the entire selection.** Require the recorded original execution root to match the selected root. Reject missing/unsafe paths, malformed JSON, duplicate fields, incompatible version/profile, invalid run/nonce UUIDs, and invalid resource records. Full resource IDs, allowed roles/kinds, and uniqueness are required. A malformed member stops the batch before resource deletion.
+3. **Validate the entire selection.** Require the recorded original execution root to match the selected root. Reject missing/unsafe paths, malformed JSON, duplicate fields, incompatible version/profile, invalid run/nonce UUIDs, invalid resource records, and malformed creation intents. Full resource IDs, allowed roles/kinds, and uniqueness are required. Before deletion, validate any saved recovery bindings against their exact original manifest. A malformed member stops the batch before resource deletion.
 4. **Create a receipt.** Write `<output>/cleanup/<cleanup-uuid>.json` with `complete: false`, the selected run identity, and its recorded resources. If this cannot be written, do not start deleting that run's resources.
-5. **Recheck each resource.** Ask Docker for its exact recorded ID, reload its attributes, and require matching Faultline/project/run/nonce labels. A mismatch is a refusal, recorded in `remaining_resources`. Labels alone never grant ownership.
-6. **Delete in order.** Remove application and other containers, then networks. Already-absent resources are success. An error on one recorded resource does not authorize deletion of a different resource.
-7. **Finish the receipt.** Save completion time, `complete`, and any unresolved IDs. Release the lock only after the recovery work and receipt writes finish.
+5. **Reconcile pending creations.** For an intent without an ID, inspect only its exact recorded name. Require all ownership and creation-token/kind/role labels, then save the full immutable ID under `cleanup/bindings/<run-uuid>.json` before any deletion. A missing or mismatched object remains unresolved. Original artifacts are not modified.
+6. **Recheck and delete in order.** Fetch each recorded or durably reconciled ID, reload attributes, and verify ownership immediately before mutation. New resources also require matching creation labels and name. Remove containers before networks. A previously bound ID that is absent is successfully cleaned; an absent unresolved intent is still uncertain. Labels or names alone never grant ownership.
+7. **Finish the receipt.** Save completion time, `complete`, reconciled IDs, and any unresolved IDs or intents. Release the lock only after the recovery work and receipt writes finish.
 
-There is one receipt per selected run per invocation, including runs whose resources are already absent. A second cleanup attempt creates a new receipt and preserves the first. The current receipt reports unresolved resources but does not provide a detailed Docker failure reason for each one.
+There is one receipt per selected run per invocation, including runs whose resources are already absent. A second cleanup attempt creates a new receipt and preserves the first. It reuses existing ID bindings instead of resolving the same name again. Preserve `cleanup/bindings/` alongside the run manifests. The current receipt reports unresolved resources but does not provide a detailed Docker failure reason for each one.
 
 ## What “stale” means here
 
@@ -77,7 +77,7 @@ See [test_recovery.py](../../tests/test_recovery.py), [test_integration.py](../.
 
 ## Remaining limitations
 
-If the coordinator dies after Docker creates a resource but before its returned ID is persisted, the resource is not in the ownership manifest. Recovery refuses to guess ownership. The missing-record window is not solved by this change.
+New runs can recover a resource created before its returned ID was recorded, using the prewritten creation intent and all matching labels. Legacy runs without intents retain the earlier limitation. An intent whose object is absent remains unresolved: the request may still finish later, or may never have reached Docker. There is no automatic abandonment command. See the [creation recovery guide](creation-recovery.md) and its [measured results](../creation-recovery-acceptance-results.md).
 
 Docker requests have individual timeouts and the stale scan is bounded, but a configurable deadline for the whole recovery command is not implemented. A daemon failure can prevent cleanup; a disk failure can prevent a receipt update. An initial incomplete receipt is intentionally conservative and can be followed by another attempt.
 

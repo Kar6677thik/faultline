@@ -1,3 +1,5 @@
+> M2 update: the original four-service subset below is historical. Current projects require a proxy as the fifth service; support local role images, declared internal routes, resource settings, environment/secret references, readiness timing, and bounded ephemeral writable paths. See [external adapters](external-adapters.md) for current runtime contracts and [the runnable manifest](../../examples/orders/faultline.project.yaml).
+
 # Projects: the laboratory's equipment list and spending limits
 
 A **scenario** is an experiment recipe: make this purchase, hide this response, and permit this retry. A **project** describes the laboratory around it: which application image to run, which services are allowed, and how much time and computing capacity the experiment may use.

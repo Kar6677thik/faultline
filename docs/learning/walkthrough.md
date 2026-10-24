@@ -1,3 +1,5 @@
+> M2 update: this is the original single-purchase walkthrough. The current engine adds five services, four networks, concurrency, proxy faults, and a durable in-flight registry. See [the experiment engine walkthrough](experiment-engine.md) and [external adapters](external-adapters.md).
+
 # One purchase, from command to evidence
 
 ## 1. Describe the experiment
@@ -52,7 +54,7 @@ An image is a packaged program. A container is a running or stopped instance of 
 
 A project can select a local application image that conforms to the same order fixture, and lower per-container CPU/memory/PID allocations within supported bounds. Preflight checks host capacity and image architecture and pins selected image IDs. Dependency/helper images and the private network topology remain constrained. No image is pulled during preflight or execution.
 
-The environment records every returned Docker resource ID and labels the resource with Faultline ownership information. Cleanup needs both the record and matching labels. A name such as `fl-example` alone is not authorization to delete anything.
+Before each Docker create call, the environment saves a creation intent with the exact generated name, role/kind, and a unique token. It then labels the resource accordingly and records the returned full ID before permitting further mutation. Cleanup needs recorded ownership and matching labels. A name such as `fl-example` alone is not authorization to delete anything. If the coordinator dies before saving the ID, [creation recovery](creation-recovery.md) can bind the ID from the exact matching intent before deletion; an absent pending object remains uncertain.
 
 ## 4. Create known starting data
 
@@ -144,9 +146,11 @@ A definite business violation can remain FAIL even if the requested fault was no
 
 New runs also save `adapter.json`: capabilities, package version, and the source-file inventory fingerprint. Installed adapters additionally record their distribution file inventory and factory address, combined with Faultline's source hash. Project-backed runs save `project.json` and its configuration hash. The manifest and report reference these identities. This helps identify the judge and laboratory used; it does not implement historical replay or prove host/container source equivalence. Cleanup uses the project label saved before resource creation and does not reload current YAML or resolve adapters.
 
+Event appends also account for interruption between writing bytes and advancing the sequence number. After an exception, a complete matching event is retained and counted once; a partial write blocks completed-report finalization instead of hiding or fabricating evidence. The [creation recovery guide](creation-recovery.md#a-related-interruption-bug-found-during-validation) explains the real regression that exposed this boundary.
+
 Writes use a temporary file and replacement for complete JSON documents. History events are appended and flushed to disk. These choices reduce partial-write ambiguity; they do not promise recovery from every disk failure or power loss.
 
-Cleanup removes recorded containers before their networks and verifies ownership immediately before deletion. Its budget includes a small reporting reserve. If deletion runs out of time, unresolved recorded IDs and completed findings are retained in an ERROR report when writing can finish. Reports remain readable without Docker. [recovery.py](../../src/faultline/recovery.py) handles later cleanup after a hard kill or failed teardown; it never changes the original experiment verdict.
+Cleanup reconciles pending creation intents, removes recorded containers before their networks, and verifies ownership immediately before deletion. Its budget includes a small reporting reserve. If deletion runs out of time, unresolved IDs/intents and completed findings are retained in an ERROR report when writing can finish. Reports remain readable without Docker. [recovery.py](../../src/faultline/recovery.py) handles later cleanup after a hard kill or failed teardown; it saves recovered IDs in separate binding records and never changes the original experiment files or verdict.
 
 ## 10. Connect claims to tests
 
@@ -161,6 +165,7 @@ Cleanup removes recorded containers before their networks and verifies ownership
 - [test_environment.py](../../tests/test_environment.py) checks ownership and failure-path cleanup.
 - [test_cli.py](../../tests/test_cli.py) checks terminal contracts and secret-safe validation output.
 - [test_recovery.py](../../tests/test_recovery.py) checks unsafe manifests, file paths, lock exclusion, and cleanup receipts.
+- [test_creation_recovery.py](../../tests/test_creation_recovery.py) checks durable creation intents, strict ownership reconciliation, saved-ID reuse, and conservative handling of absent pending objects. The integration suite additionally kills real child processes before they record a newly created network/container ID.
 - [test_deadlines.py](../../tests/test_deadlines.py) checks stage/total budgets, real alarms, partial evidence, uncertain drain, and bounded teardown/finalization.
 - [test_integration.py](../../tests/test_integration.py) runs actual Docker/PostgreSQL experiments, including real process signals.
 

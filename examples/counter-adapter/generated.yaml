@@ -1,0 +1,14 @@
+schema_version: 1
+id: generated_counter
+adapter_profile: counter_v1
+fixture: empty_counter
+seed: 17
+concurrency: 3
+operations: []
+generators:
+  - id: increments
+    kind: counter.increments
+    count: 3
+    parameters: {}
+invariants:
+  - counter.exactly_once

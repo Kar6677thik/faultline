@@ -1,0 +1,15 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "faultline-counter-example"
+version = "0.1.0"
+requires-python = ">=3.12"
+dependencies = ["faultline==0.1.0"]
+
+[project.entry-points."faultline.adapters"]
+counter_example = "faultline_counter:CounterAdapter"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/faultline_counter"]

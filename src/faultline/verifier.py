@@ -105,7 +105,68 @@ def verify(
 ) -> list[dict]:
     validate_baseline(baseline)
     validate_snapshot(final)
-    operation = scenario.operations[0]
+    results = []
+    groups = {}
+    for operation in scenario.all_operations:
+        groups.setdefault(operation.logical_id, []).append(operation)
+    allowed_attempts = {
+        f"{op.id}/{i}"
+        for op in scenario.all_operations
+        for i in range(1, op.retry.max_attempts + 1)
+    }
+    seen = set()
+    for attempt in attempts:
+        identity = attempt.get("attempt_id")
+        if identity not in allowed_attempts or identity in seen:
+            raise EvidenceError("unknown or duplicate attempt identity")
+        seen.add(identity)
+    for operations in groups.values():
+        op_ids = {op.id for op in operations}
+        selected = [a for a in attempts if a["attempt_id"].rsplit("/", 1)[0] in op_ids]
+        results.extend(_verify_purchase(operations, baseline, final, selected, workload_complete))
+    # Filtering by declared identity must never silently discard orphan/unrequested effects.
+    unknown = [
+        row
+        for table in ("orders", "ledger", "movements", "outbox")
+        for row in final["records"][table]
+        if row["purchase_id"] not in groups
+    ]
+    if unknown and final["complete"] and final["quiescent"]:
+        result = next(r for r in results if r["invariant_id"] == "orders.purchase_atomicity")
+        result["status"] = "FAIL"
+        result["failures"].append(
+            {
+                "code": "unrequested_effect",
+                "expected": [],
+                "observed": unknown,
+                "evidence": ["snapshots/final.json#/records"],
+            }
+        )
+        result["signatures"].append(digest(["orders.purchase_atomicity", "unrequested_effect"]))
+    order_ids = {row["order_id"] for row in final["records"]["orders"]}
+    orphan_tokens = [
+        row for row in final["records"]["idempotency"] if row["order_id"] not in order_ids
+    ]
+    if orphan_tokens and final["complete"] and final["quiescent"]:
+        result = next(r for r in results if r["invariant_id"] == "orders.idempotency_contract")
+        result["status"] = "FAIL"
+        result["failures"].append(
+            {
+                "code": "orphan_idempotency_record",
+                "expected": [],
+                "observed": orphan_tokens,
+                "evidence": ["snapshots/final.json#/records/idempotency"],
+            }
+        )
+        result["signatures"].append(
+            digest(["orders.idempotency_contract", "orphan_idempotency_record"])
+        )
+    return results
+
+
+def _verify_purchase(operations, baseline, final, attempts, workload_complete):
+    positive = [op for op in operations if op.expectation == "success"]
+    operation = (positive or operations)[0]
     intent = operation.request.body.model_dump()
     logical_id = operation.logical_id
     if not final["complete"] or not final["quiescent"]:
@@ -124,7 +185,8 @@ def verify(
 
     state = final["records"]
     orders, ledger, movements, outbox = (
-        state[k] for k in ("orders", "ledger", "movements", "outbox")
+        [row for row in state[k] if row["purchase_id"] == logical_id]
+        for k in ("orders", "ledger", "movements", "outbox")
     )
     amount = baseline["records"]["products"][0]["price_minor"] * intent["quantity"]
     failures = {name: [] for name in INVARIANTS}
@@ -196,7 +258,7 @@ def verify(
         )
 
     expected_balance = 1000000 - sum(
-        row["amount_minor"] * (1 if row["direction"] == "debit" else -1) for row in ledger
+        row["amount_minor"] * (1 if row["direction"] == "debit" else -1) for row in state["ledger"]
     )
     balances = state["accounts"]
     if (
@@ -207,7 +269,7 @@ def verify(
             or r["direction"] not in {"debit", "credit"}
             or r["amount_minor"] <= 0
             or r["currency"] != "INR"
-            for r in ledger
+            for r in state["ledger"]
         )
     ):
         fail(
@@ -218,11 +280,11 @@ def verify(
             ["accounts", "ledger"],
         )
 
-    expected_stock = 10 + sum(row["quantity_delta"] for row in movements)
+    expected_stock = 10 + sum(row["quantity_delta"] for row in state["movements"])
     if (
         state["products"] != [{"sku": "sku-a", "price_minor": 200000, "stock": expected_stock}]
         or expected_stock < 0
-        or any(row["sku"] != "sku-a" for row in movements)
+        or any(row["sku"] != "sku-a" for row in state["movements"])
     ):
         fail(
             "inventory_conservation",
@@ -252,18 +314,47 @@ def verify(
         a["upstream"] for a in attempts if a.get("upstream", {}).get("outcome") == "http_response"
     ]
     success = [w for w in witnesses if w["status"] == 201]
-    tokens = state["idempotency"]
-    idempotent = all(w["body"] in valid_orders for w in success)
+    keys = {
+        next(v for k, v in op.request.headers.items() if k.lower() == "idempotency-key")
+        for op in positive
+    }
+    tokens = [row for row in state["idempotency"] if row["key"] in keys or row["order_id"] in ids]
+    idempotent = all(w["body"] in valid_orders for w in success) and (bool(positive) or not success)
     # This profile declares only positive purchases. A retry that returns (for example)
     # insufficient_funds after the first committed debit is not an idempotent API result,
     # even if the depleted wallet incidentally prevents a second debit.
-    idempotent &= all(w["status"] == 201 for w in witnesses)
+    expected_rejections = {
+        op.id: (422, "invalid_request")
+        if op.expectation == "invalid_quantity"
+        else (409, op.expectation)
+        for op in operations
+        if op.expectation != "success"
+    }
+    observed_rejections = set()
+    for attempt in attempts:
+        witness = attempt.get("upstream", {})
+        if witness.get("outcome") != "http_response":
+            continue
+        op_id = attempt["attempt_id"].rsplit("/", 1)[0]
+        if op_id in expected_rejections:
+            status, code = expected_rejections[op_id]
+            matches = (
+                witness.get("status") == status
+                and isinstance(witness.get("body"), dict)
+                and witness["body"].get("code") == code
+            )
+            if matches:
+                observed_rejections.add(op_id)
+            idempotent &= matches or witness["status"] in {429, 500, 502, 503, 504}
+        else:
+            idempotent &= witness["status"] == 201 or witness["status"] in {429, 500, 502, 503, 504}
     idempotent &= len({digest(w["body"]) for w in success}) <= 1
-    idempotent &= len(tokens) == len(orders) and len(tokens) <= 1
+    idempotent &= (bool(tokens) == bool(orders)) and len(tokens) <= len(keys)
+    idempotent &= len({(r["account_id"], r["key"]) for r in tokens}) == len(tokens)
     idempotent &= all(
         row["order_id"] in ids
         and row["account_id"] == intent["account_id"]
-        and row["key"] == operation.request.headers["Idempotency-Key"]
+        and row["key"] in keys
         and row["fingerprint"] == digest(intent)
         for row in tokens
     )
@@ -276,8 +367,25 @@ def verify(
             ["idempotency", "orders"],
         )
 
-    if workload_complete and len(valid_orders) != 1:
-        fail("completed_purchase", "purchase_not_completed_once", 1, len(valid_orders), ["orders"])
+    expected_count = 1 if positive else 0
+    if workload_complete and (
+        len(valid_orders) != expected_count or set(expected_rejections) != observed_rejections
+    ):
+        fail(
+            "completed_purchase",
+            "purchase_not_completed_once",
+            expected_count,
+            len(valid_orders),
+            ["orders"],
+        )
+    if not positive and any((orders, ledger, movements, outbox)):
+        fail(
+            "purchase_atomicity",
+            "rejected_purchase_has_effects",
+            [],
+            orders,
+            ["orders", "ledger", "movements", "outbox"],
+        )
 
     results = []
     for name in INVARIANTS:

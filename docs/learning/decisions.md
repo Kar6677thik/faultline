@@ -1,6 +1,6 @@
 # Why Faultline is built this way
 
-These are implementation decisions, explained for learning. They complement the [release-level decisions](../../specs/11-decisions.md); a future requirement may change a choice. Each entry states what works now, why we chose it, alternatives, and the cost. All entries below were documented on 2026-10-23.
+These are implementation decisions, explained for learning. They complement the [release-level decisions](../../specs/11-decisions.md); a future requirement may change a choice. Each entry states what works now, why we chose it, alternatives, and the cost. L-001 through L-032 were documented on 2026-10-23; L-033 through L-036 on 2026-10-24.
 
 ## L-001: Prove one failure before building a platform
 
@@ -154,7 +154,7 @@ These are implementation decisions, explained for learning. They complement the 
 
 **Reason:** the critical safety property is avoiding unrelated-resource deletion. Repeating cleanup must be safe because a previous attempt may have stopped halfway through.
 
-**Alternative and cost:** there is a small unavoidable gap between Docker creating a resource and the coordinator persisting its returned ID. A kill in that gap can leave an unrecorded resource that this tool refuses to recover. Future creation/reconciliation work needs its own authorization design. Per-request Docker timeouts exist, but a whole recovery-command deadline and guaranteed machine-crash durability are still deferred.
+**Alternative and cost:** the original implementation could not recover a resource created before its ID was saved. L-033 through L-035 now add prewritten creation intents and durable reconciliation for new runs. Missing legacy intents and unresolved absent creations remain conservative refusals. Per-request Docker timeouts exist, but a whole recovery-command deadline and guaranteed machine-crash durability are still deferred.
 
 ## L-016: Keep the outbox claim narrow
 
@@ -224,7 +224,7 @@ These are implementation decisions, explained for learning. They complement the 
 
 **Reason:** using every cleanup millisecond on deletion would leave no chance to explain failure or support later scoped recovery. A worker stream-close exception must not prevent attempts to remove its container.
 
-**Alternative and cost:** unbounded emergency reporting would violate the total budget. A very small budget, full disk, or delayed signal can therefore leave only a partial bundle. Timing in a report ends before report assembly; we do not fabricate finalization duration before it has finished. Standalone recovery command deadlines and creation-record recovery remain separate future work.
+**Alternative and cost:** unbounded emergency reporting would violate the total budget. A very small budget, full disk, or delayed signal can therefore leave only a partial bundle. Timing in a report ends before report assembly; we do not fabricate finalization duration before it has finished. Standalone recovery command deadlines remain future work. L-033 through L-035 subsequently add creation-record recovery without changing these timer guarantees.
 
 ## L-023: Introduce a checked internal adapter before external registration
 
@@ -331,3 +331,119 @@ These are implementation decisions, explained for learning. They complement the 
 **Reason:** an installed module can hang even before the first hook. Starting the run timer only after Docker preflight would leave that work unbounded. Separating selection from evidence reading also means uninstalling a package does not prevent investigation or cleanup.
 
 **Alternative and cost:** a subprocess sandbox would need a larger serialization, capability, cancellation, and environment-control protocol. It is unnecessary for the current trusted-code contract. The timer is not hard real-time enforcement and cannot safely police hostile code. Duplicate validation adds bounded overhead and requires side-effect-free hooks; total scenario time excludes adapter preflight. Preflight failures have structured CLI diagnostics but no run bundle because no experiment has started.
+
+## L-033: Write creation intent before contacting Docker
+
+**Choice:** save exact generated name, kind/role, and a fresh UUID token in the manifest before each create request. Apply that token and role/kind as resource labels alongside existing run/project/nonce labels. Require one intent per supported role. Reconciliation may inspect only the exact recorded name and must verify every label before binding a full immutable ID.
+
+**ELI5:** write down a numbered claim ticket before ordering equipment, so a lost delivery receipt does not force us to guess which equipment is ours.
+
+**Reason:** Docker can create a resource even when the coordinator dies before saving its ID. The daemon and local filesystem cannot participate in one atomic transaction. Prewritten intent provides an explicit, narrow ownership record for this gap.
+
+**Alternative and cost:** loose label/prefix scans can mistake unrelated resources for ours; requiring an already recorded ID leaves the creation window unrecoverable. The intent adds a small synchronous write and three labels per resource. It does not authorize mutation until an ID has also been persisted and rechecked. Trusted local Docker and workspace assumptions remain; this does not defend against a malicious administrator copying ownership labels.
+
+## L-034: Persist recovered IDs outside original experiment evidence
+
+**Choice:** live cleanup saves reconciled IDs in its still-active manifest. Later `clean` saves bindings under `cleanup/bindings/<run-uuid>.json`, tied to the run/nonce and exact original-manifest hash. Validate all selected bindings before deletion; write each new binding before granting mutation rights. Reuse bound IDs on subsequent cleanup attempts.
+
+**ELI5:** put the recovered serial number in a separate recovery notebook. Never rewrite yesterday's experiment, and never swap the serial number for another box just because its name was reused.
+
+**Reason:** another crash can occur between binding, deletion, and the final cleanup receipt. Durable bindings make retries safe while preserving the original artifacts. An interrupted receipt does not erase the ownership information already saved.
+
+**Alternative and cost:** rewriting an original manifest breaks evidence preservation. Saving IDs only in a final receipt leaves another missing-record window. This introduces one small recovery-state file per reconciled run, bounded by the existing six-role inventory. Users must retain it with their manifests and receipts. It is not a separate database, automatic repair mechanism, or power-loss durability guarantee.
+
+## L-035: Treat an absent pending creation as uncertain
+
+**Choice:** a missing bound ID counts as successfully absent; a missing unbound intent remains in `remaining_resources` and makes cleanup incomplete. Wrong ownership, ambiguous lookup, or inability to persist a binding also leaves the intent unresolved. A later cleanup may recover a delayed object if it appears.
+
+**ELI5:** an empty delivery doorstep does not prove the warehouse stopped making your box.
+
+**Reason:** a failed or interrupted client request does not prove the daemon operation was cancelled. Treating a temporary absence as success could hide a later resource leak.
+
+**Alternative and cost:** automatic retries could create duplicates; declaring absence final would be an unsupported guarantee. A crash after saving intent but before submitting creation may leave permanent uncertainty despite no actual leftover. An explicit abandonment policy or reliable daemon-side request completion protocol is deferred. The tool reports uncertainty rather than inventing success. The [creation recovery guide](creation-recovery.md) maps these decisions to code and tests.
+
+## L-036: Reconcile an interrupted event append before recording another event
+
+**Choice:** if an event append raises an exception or signal, compare the bytes at that append's original offset with the exact intended event. A complete matching event advances the sequence once; no bytes means no advancement; partial or unreadable data prevents further append and completed-report finalization. Preserve all original bytes and re-raise the interruption.
+
+**ELI5:** if you were interrupted after writing line four but before moving your bookmark, check the notebook before writing another line four.
+
+**Reason:** the real SIGTERM regression exposed a complete `ready` event followed by a cleanup event with the same sequence number. File persistence and the in-memory counter are not one atomic operation. The resulting report correctly failed offline integrity validation even though container cleanup succeeded.
+
+**Alternative and cost:** blocking cancellation signals through `fsync` would delay timer handling; advancing the counter before writing can leave a gap; deleting a partial line would discard evidence. The chosen repair reads at most the attempted event length plus one byte on an exceptional path and does not reconstruct missing contents. A genuinely partial write now leaves an explicitly incomplete bundle rather than a completed but corrupt report. This handles ordinary process interruption, not power-loss durability. Tests in [test_artifacts.py](../../tests/test_artifacts.py) interrupt after a real `fsync` and inject a partial write.
+
+## L-037: Materialize values before concurrent admission
+
+**Choice:** use versioned SHA-256 counter expansion for the bundled purchase generator and save every body, identity, default, and potential attempt. Bind the selected adapter's fixture digest and property versions before execution.
+
+**ELI5:** write the entire recipe before several cooks begin; the fastest cook must not choose the next ingredient for everyone else.
+
+**Reason:** asynchronous completion must not affect generated values. **Alternative and cost:** a shared random generator is simpler but scheduling-dependent. Counter hashing is stable but modulo mapping is not a claim of unbiased statistical sampling. Saved plans support later replay work; they are not deterministic execution.
+
+## L-038: Keep scheduler decisions and evidence writes on one coordinator
+
+**Choice:** bounded transport threads return results to one scheduler. It owns dependency/barrier state, conditional retry admission, fault gates, and history writes. Backoff releases capacity; response suppression retains it.
+
+**ELI5:** one teacher keeps the attendance register while students work independently.
+
+**Reason:** competing threads must not write conflicting event sequences or exceed concurrency. **Alternative and cost:** an entirely asynchronous coordinator would require converting blocking Docker and trusted adapter calls; independent per-request processes waste memory. Current controller calls can delay coordinator processing, and actual completion order remains nondeterministic. Tests prove bounded overlap and admission rules rather than assuming a barrier creates overlapping database transactions.
+
+## L-039: Multiplex a bounded acknowledged worker stream
+
+**Choice:** protocol version 2 uses one reader, serialized writes, per-command mailboxes, positive admission acknowledgment, and correlated results. The worker shares one Python interpreter across at most 32 HTTP tasks.
+
+**ELI5:** numbered tickets let several orders finish in any order without handing one customer's receipt to another.
+
+**Reason:** an interpreter per slot exceeds the small-container budget. **Alternative and cost:** sequential transport cannot exercise concurrency; unbounded tasks can exhaust memory. EOF, unknown IDs, missing acknowledgments, and helper deadlines are harness errors. No implicit command retry is attempted. A tested reversed-response exchange protects correlation.
+
+## L-040: Separate data traffic, administration, and independent observation
+
+**Choice:** four internal networks and five owned containers; bind proxy administration to a control-only DNS alias. Pin Toxiproxy 2.12.0 and require configuration read-back for application and healing. Extend recovery's strict ownership inventory to nine roles.
+
+**ELI5:** put the equipment controls in a room the tested application cannot enter, and give the examiner a separate window onto the database.
+
+**Reason:** bypassing the proxy invalidates a fault experiment; exposing admin permits the application to alter its test. **Alternative and cost:** a static endpoint address was rejected on Docker's automatically allocated subnet. A control-only alias avoids manual subnet management. The wildcard data listener's normalized address is explicitly checked. Real probes test forbidden connections, existing-connection termination, and new-connection refusal. Configured latency does not identify a SQL statement. One fault per binding avoids inventing ambiguous overlap semantics.
+
+## L-041: Register work before mutation, reconcile only after process and session exit
+
+**Choice:** commit an in-flight row with process epoch and database PID/start time before business work. Retain uncertain rows after connection errors. Drain confirms owned-process exit and zero application sessions before clearing stale diagnostic registrations.
+
+**ELI5:** sign into the workshop before touching anything; an empty chair is not proof the job finished.
+
+**Reason:** client timeout and process restart can leave work or stale registrations. **Alternative and cost:** repeated equal balances or handler response flags cannot prove completion. The extra connection and registration write add overhead and are test instrumentation. The bundled profile has no background mutation after handler exit; other applications must supply their own completion contract. Forced drain remains uncertain.
+
+## L-042: Generalize the boundary using an independent counter application
+
+**Choice:** accept declared local role images, internal routes, generic integer JSON requests, trusted helper modules, and pure adapter findings. Demonstrate a separately built counter wheel/image with independent tables and verification. Public quiescence reports ready/pending/unknown with evidence.
+
+**ELI5:** test whether the examination system can judge a different subject, rather than renaming the original textbook.
+
+**Reason:** inheriting OrdersAdapter only proves packaging. **Alternative and cost:** arbitrary service graphs, database engines, or hostile-code sandboxing are larger problems and remain outside v1. The five-role PostgreSQL topology, compatible helper protocols, fixed security settings, and explicit image runtime contracts still apply. Secret references are resolved locally and never persisted as resolved values. This counter example does not replace M4's transfer-domain gate.
+
+## L-043: Reconcile per-intent effects against whole-state totals
+
+**Choice:** emit every invariant for every logical identity; scope atomicity/idempotency to the relevant intent while summing all ledger and inventory records. Report unrequested effects and orphan tokens explicitly. Validate expected rejection responses and absence of new effects.
+
+**ELI5:** check each receipt, then reconcile the entire cash drawer; hiding an unknown receipt must not make the arithmetic pass.
+
+**Reason:** the one-purchase verifier's global count would falsely fail legitimate independent purchases; naive filtering would hide orphan effects. **Alternative and cost:** checking HTTP status alone misses committed duplicates and ambiguous timeouts. The bundled verifier still has a deliberately small fixture and seven specific rules. Retryable database 503s are transport evidence, not proof that a transaction rolled back.
+
+## L-044: Check registered generator output as ordinary untrusted input
+
+**Choice:** add an optional trusted adapter `expand(generator, seed)` hook with an exact output contract. Validate the returned operation count/version and every request, then rerun graph and budget checks on the complete materialized workload. Save both values and algorithm metadata. Keep the bundled purchase expansion available as version 1.
+
+**ELI5:** a recipe writer may hand us instructions, but we still count the ingredients and check that step two does not wait forever for step three.
+
+**Reason:** hardcoding only the purchase generator would prevent a separately packaged domain from using the same experiment engine. Parsing a custom generator happens before its adapter is loaded, so expanded dependencies and attempt totals can only be checked after the hook returns. Tests demonstrate that this second check cannot bypass project ceilings. The independent counter example supplies its own generator and verifies actual resulting rows.
+
+**Alternatives and tradeoffs:** loading arbitrary Python from YAML would violate the installed-code boundary. Implementing every domain generator in the core would couple the engine to applications. Trusted hooks keep domain logic in the adapter, but their determinism is the author's responsibility; three-process checks provide evidence for the bundled examples, not proof for every third-party plugin. Each expansion is bounded to 1 MiB and preflight has a ten-second total allowance. Invalid output never reaches Docker. Exact replay and compatibility checking remain M3.
+
+## L-045: Keep validation phases and claims separate
+
+**Choice:** preserve the full 38-case regression result, the final focused runtime checks, and earlier failed provisioning experiments as distinct measurements. Reports now describe the recorded workload and identify the logical intent beside each finding.
+
+**ELI5:** a school report should say which exam was taken on which day; combining marks from different exams must not look like one perfect exam.
+
+**Reason:** the final generator contract changed after the full regression run. A focused real follow-up covers those changes without pretending the earlier run tested later source. The disk-full test injects an ENOSPC exception at the artifact boundary; it does not exhaust the user's physical disk.
+
+**Alternative and limit:** repeating every long Docker test after documentation or isolated contract changes adds cost without resolving new uncertainty. Focused checks supplement, rather than rename, the existing full pass. M2 completion does not establish deterministic execution, release-wide defect discrimination, CI performance, or M3/M4 functionality. The acceptance report links each claim to its actual evidence.

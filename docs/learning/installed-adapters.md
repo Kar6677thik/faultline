@@ -1,3 +1,5 @@
+> M2 update: installation/provenance rules here still apply. The inherited order wrapper remains a packaging example; [the counter adapter](external-adapters.md) now demonstrates an independent application, schema, and verifier.
+
 # Installing a different laboratory assistant
 
 The engine is the laboratory supervisor; an adapter is the assistant who understands the business rules. Previously the assistant had to come inside Faultline's own box. Now a project can choose an assistant delivered in a separate Python package.

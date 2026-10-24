@@ -11,10 +11,11 @@ This guide describes the code currently implemented. The [release specifications
 1. [Walk through one purchase](walkthrough.md): the complete journey, each Python module, the database records, and what the checks mean.
 2. [Understand the decisions](decisions.md): why we chose this design, the alternatives, and what we give up.
 3. [Learn crash recovery](recovery.md): locks, ownership, hard kills, cleanup receipts, and the actual recovery procedure.
+   Continue with [lost creation receipts](creation-recovery.md): write intent before creating equipment, bind its ID before deletion, and distinguish absence from uncertainty.
 4. [Learn time budgets](deadlines.md): request timeouts, stage deadlines, reserved cleanup time, and what happens when work runs late.
 5. [Understand adapters](adapters.md): separate the supervisor from the domain assistant, check the judge's outputs, and identify its source.
 6. [Configure a project](projects.md): separate a recipe from its laboratory, constrain paths and budgets, and pin local images.
-7. [Install an adapter](installed-adapters.md): package address cards, version checks, content fingerprints, preflight deadlines, and the remaining public API gap.
+7. [Install an adapter](installed-adapters.md): package address cards, version checks, content fingerprints, and preflight deadlines; continue with [external applications](external-adapters.md) for the current public contract.
 8. [Look up unfamiliar words](glossary.md): short explanations with Faultline examples.
 9. [Run the README demo](../../README.md#demonstrate-the-defect-and-correction), then compare its evidence with [measured results](../acceptance-results.md).
 
@@ -48,3 +49,11 @@ Ask why a wallet conservation check can pass even when the customer was charged 
 Compare a timeout with a rollback. A timeout describes what the client knows; a rollback describes what the database did. They are different facts.
 
 Read the hard-kill integration test after the recovery guide. Identify which assertion proves the other environment survived, which proves the original files were preserved, and which prevents cleanup from inventing a successful experiment.
+
+## Experiment engine and external applications
+
+Read [the experiment engine walkthrough](experiment-engine.md) for generators, concurrent admission, barriers, retries, proxy faults, and in-flight evidence. Then read [external adapters](external-adapters.md) to run a separately packaged counter application and understand the public hooks. These extend the historical M1 walkthroughs; the implementation-status page remains the current scope reference.
+
+The [M2 acceptance report](../m2-acceptance-results.md) connects each milestone gate
+to actual tests and measurements, including failed development trials and their fixes.
+Decisions L-037 through L-045 explain the engine's design and limits in plain language.

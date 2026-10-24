@@ -34,11 +34,12 @@ class Bundle:
         (self.path / "snapshots").mkdir()
         self.budget = scenario.limits.artifact_bytes
         self.sequence = 0
+        self.history_broken = False
         self.manifest = {
             "bundle_schema_version": 1,
             "run_id": self.run_id,
             "engine_version": __version__,
-            "implementation_profile": "milestone1",
+            "implementation_profile": "experiment_engine_v1",
             "project_id": project["project_id"] if project else "orders-m1",
             # Recovery must acquire the original execution lock, not a copied bundle's lock.
             "execution_root": str(output.resolve()),
@@ -48,6 +49,7 @@ class Bundle:
             "stage": "created",
             "ownership_nonce": str(uuid4()),
             "resources": [],
+            "creation_intents": [],
             "artifacts": {},
             "plan_hash": digest(scenario.plan()),
         }
@@ -74,6 +76,8 @@ class Bundle:
         atomic_json(self.path / "manifest.json", self.manifest)
 
     def event(self, kind: str, payload: dict, **refs) -> str:
+        if self.history_broken:
+            raise OSError("Cannot append after an incomplete history write")
         event_id = str(uuid4())
         now = time.monotonic_ns()
         event = {
@@ -92,12 +96,32 @@ class Bundle:
         }
         raw = canonical_bytes(event) + b"\n"
         self._check_budget(len(raw))
-        with (self.path / "history.ndjson").open("ab") as stream:
-            stream.write(raw)
-            stream.flush()
-            os.fsync(stream.fileno())
-        self.sequence += 1
-        return event_id
+        path = self.path / "history.ndjson"
+        offset = path.stat().st_size if path.exists() else 0
+        try:
+            with path.open("ab") as stream:
+                stream.write(raw)
+                stream.flush()
+                os.fsync(stream.fileno())
+            self.sequence = event["sequence"]
+            return event_id
+        except BaseException:
+            # A signal can arrive after bytes reach disk but before the counter advances.
+            # Preserve complete events; never append over a partial line or invent its contents.
+            try:
+                if path.exists():
+                    with path.open("rb") as stream:
+                        stream.seek(offset)
+                        appended = stream.read(len(raw) + 1)
+                else:
+                    appended = b""
+                if appended == raw:
+                    self.sequence = event["sequence"]
+                elif appended:
+                    self.history_broken = True
+            except BaseException:
+                self.history_broken = True
+            raise
 
     def stage(self, stage: str):
         self.manifest["stage"] = stage
@@ -105,6 +129,8 @@ class Bundle:
         self.event("lifecycle", {"stage": stage})
 
     def finalize(self, report: dict):
+        if self.history_broken:
+            raise OSError("Incomplete history write; evidence retained without a completed report")
         report["report_schema_version"] = 1
         report["run_id"] = self.run_id
         report["last_sequence"] = self.sequence
@@ -138,7 +164,7 @@ def render_markdown(report: dict, manifest: dict) -> str:
         f"Scenario: `{manifest['scenario_id']}`",
         f"Variant: `{manifest['variant']}`",
         "",
-        "Scope: one purchase, controlled client response suppression, PostgreSQL authority.",
+        "Scope: the recorded materialized workload, declared faults, and adapter invariants.",
         "This is not TCP packet loss or proof of correctness under all schedules.",
         "",
         f"Required fault coverage: {report['coverage']['required_applied']}/"
@@ -147,7 +173,13 @@ def render_markdown(report: dict, manifest: dict) -> str:
         "",
     ]
     for result in report["invariants"]:
-        lines.extend([f"## {result['invariant_id']}: {result['status']}", ""])
+        lines.extend(
+            [
+                f"## {result['invariant_id']} ({result.get('logical_id', 'run')}): "
+                f"{result['status']}",
+                "",
+            ]
+        )
         for failure in result["failures"]:
             lines.extend(
                 [

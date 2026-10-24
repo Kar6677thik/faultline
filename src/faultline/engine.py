@@ -1,4 +1,4 @@
-"""One bounded purchase experiment, real environment, and independent final verification."""
+"""Bounded experiments, owned environments, and independent authoritative verification."""
 
 import json
 import time
@@ -8,110 +8,11 @@ from faultline.adapters import AdapterError
 from faultline.artifacts import Bundle
 from faultline.deadlines import DeadlineExceeded, RunDeadlines, check_alarm_available
 from faultline.environment import Environment, client_and_preflight
+from faultline.faults import FaultController
 from faultline.locking import execution_lock
-from faultline.models import canonical_bytes, verdict
+from faultline.models import verdict
 from faultline.projects import Project
-
-
-def execute_attempts(
-    scenario,
-    transport,
-    emit,
-    run_id,
-    *,
-    clock=time.monotonic,
-    sleep=time.sleep,
-    attempts=None,
-    applied=None,
-):
-    operation = scenario.operations[0]
-    body = canonical_bytes(operation.request.body.model_dump()).decode()
-    attempts = [] if attempts is None else attempts
-    applied = set() if applied is None else applied
-    started = clock()
-    complete = True
-    for index in range(1, operation.retry.max_attempts + 1):
-        if (clock() - started) * 1000 >= scenario.limits.execution_ms:
-            complete = False
-            break
-        attempt_id = f"{operation.id}/{index}"
-        refs = {"operation_id": operation.id, "attempt_id": attempt_id}
-        headers = dict(
-            operation.request.headers,
-            **{
-                "Content-Type": "application/json",
-                "X-Faultline-Run-Id": run_id,
-                "X-Faultline-Operation-Id": operation.id,
-                "X-Faultline-Attempt-Id": attempt_id,
-            },
-        )
-        emit("attempt_dispatched", {"request": operation.request.model_dump(by_alias=True)}, **refs)
-        dispatched = clock()
-        upstream = transport(
-            {
-                "method": "POST",
-                "path": "/orders",
-                "body": body,
-                "headers": headers,
-                "timeout_ms": operation.timeout_ms,
-            }
-        )
-        elapsed = clock() - dispatched
-        outcome = upstream["outcome"]
-        if outcome == "http_response":
-            emit("upstream_response_complete", upstream, **refs)
-        # A late response can inform state/response checks, but cannot trigger this fault.
-        if elapsed >= operation.timeout_ms / 1000:
-            outcome = "timeout"
-        for fault in scenario.faults:
-            if (
-                fault.trigger.attempt == index
-                and upstream.get("status") == fault.trigger.status
-                and outcome == "http_response"
-                and fault.id not in applied
-            ):
-                emit("fault_eligible", {"kind": fault.kind}, fault_id=fault.id, **refs)
-                emit(
-                    "fault_applied",
-                    {
-                        "kind": fault.kind,
-                        "upstream_status": upstream["status"],
-                        "semantics": "client_response_suppression",
-                    },
-                    fault_id=fault.id,
-                    **refs,
-                )
-                applied.add(fault.id)
-                sleep(max(0, operation.timeout_ms / 1000 - (clock() - dispatched)))
-                outcome = "timeout"
-                emit("fault_healed", {"one_shot": True}, fault_id=fault.id, **refs)
-        attempt = {
-            "attempt_id": attempt_id,
-            "outcome": outcome,
-            "upstream": upstream,
-            "duration_ms": round((clock() - dispatched) * 1000),
-        }
-        if index in {f.trigger.attempt for f in scenario.faults if f.id in applied}:
-            attempt["cause"] = "injected_response_suppression"
-        attempts.append(attempt)
-        emit("client_outcome", {k: v for k, v in attempt.items() if k != "upstream"}, **refs)
-        if outcome not in operation.retry.on:
-            for unused in range(index + 1, operation.retry.max_attempts + 1):
-                emit(
-                    "attempt_not_needed",
-                    {},
-                    operation_id=operation.id,
-                    attempt_id=f"{operation.id}/{unused}",
-                )
-            break
-        if index < operation.retry.max_attempts:
-            emit(
-                "retry_eligible",
-                {"next_attempt": index + 1, "backoff_ms": operation.retry.backoff_ms[index - 1]},
-                **refs,
-            )
-            sleep(operation.retry.backoff_ms[index - 1] / 1000)
-    return attempts, applied, complete
+from faultline.scheduler import execute_attempts
 
 
 def run_one(scenario, variant, output, *, client=None, platform_info=None, project=None):
@@ -175,6 +76,7 @@ def _run_one(
     complete = False
     interrupted = False
     cleanup = {"complete": False, "remaining_resources": []}
+    controller = FaultController(env, scenario, bundle.event, applied)
     try:
         with deadlines.stage("provisioning", limits.provisioning_ms, started=deadlines.started):
             bundle.stage("provisioning")
@@ -219,6 +121,7 @@ def _run_one(
                     bundle.run_id,
                     attempts=attempts,
                     applied=applied,
+                    controller=controller,
                 )
         except DeadlineExceeded as exc:
             complete = False
@@ -227,7 +130,14 @@ def _run_one(
         try:
             with deadlines.stage("draining", limits.drain_ms):
                 bundle.stage("draining")
-                graceful = adapter.quiesce(env, limits.drain_ms)
+                controller.heal_all()
+                quiescence = adapter.quiesce(env, limits.drain_ms)
+                bundle.event("adapter_quiescence", quiescence)
+                while quiescence["state"] == "pending":
+                    time.sleep(0.05)
+                    quiescence = adapter.quiesce(env, limits.drain_ms)
+                    bundle.event("adapter_quiescence", quiescence)
+                graceful = quiescence["state"] == "ready"
         except DeadlineExceeded as exc:
             graceful = False
             diagnostics.append(exc.diagnostic("warning"))
@@ -284,6 +194,16 @@ def _run_one(
         cleanup_end, finalization_end = deadlines.cleanup_windows()
         try:
             with deadlines.until("cleanup", cleanup_end, "cleanup"):
+                try:
+                    controller.heal_all()
+                except Exception:
+                    diagnostics.append(
+                        {
+                            "severity": "error",
+                            "code": "fault_healing_failed",
+                            "message": "Fault recovery failed before teardown",
+                        }
+                    )
                 cleanup = env.cleanup()
         except (DeadlineExceeded, KeyboardInterrupt, Exception) as exc:
             if isinstance(exc, KeyboardInterrupt):
@@ -347,6 +267,13 @@ def finalize_run(
             }
         )
     required = {fault.id for fault in scenario.faults if fault.required}
+    for fault in scenario.faults:
+        if fault.id not in applied:
+            bundle.event(
+                "fault_unapplied",
+                {"kind": fault.kind, "required": fault.required},
+                fault_id=fault.id,
+            )
     coverage = {
         "required_total": len(required),
         "required_applied": len(required & applied),
@@ -359,7 +286,7 @@ def finalize_run(
             {
                 "severity": "warning",
                 "code": "fault_not_triggered",
-                "message": "Required response fault did not match an eligible response",
+                "message": "A required fault has no successful application acknowledgment",
             }
         )
     report = {

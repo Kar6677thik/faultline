@@ -2,7 +2,7 @@
 
 Faultline tests whether backend business rules survive retries and failures, using authoritative state rather than HTTP status alone.
 
-**The first executable milestone is implemented:** one real PostgreSQL-backed purchase, a controlled lost response, a retry, and independent correctness checks. Both an unsafe backend and a transactionally idempotent backend are included. This is an early CLI implementation, not the complete v1 platform.
+Faultline now includes concurrent experiments, materialized workloads, barriers and dependency gates, acknowledged database proxy faults and application restarts, and independent PostgreSQL verification. Milestone 2 is complete for the supported experiment engine; this is not the complete v1 release. The original unsafe/correct purchase demonstration remains a regression.
 
 The stack is Python, FastAPI, PostgreSQL, and disposable Linux Docker containers. React remains planned for the later read-only report viewer. See the [full specification](specs/README.md), [implemented scope and limitations](docs/implementation-status.md), and [engineering principles](docs/engineering-principles.md) derived from the supplied field guide.
 
@@ -15,6 +15,7 @@ Use Linux x86-64 or Debian/Ubuntu in WSL2 on Windows, Python 3.12 or 3.13, a loc
 ```bash
 uv sync --frozen
 docker pull postgres@sha256:eee6c6e1b0894fa4fe0075eb054af9fd1cf39a35321c2d4110626cfe506411fb
+docker pull ghcr.io/shopify/toxiproxy@sha256:9378ed52a28bc50edc1350f936f518f31fa95f0d15917d6eb40b8e376d1a214e
 docker build -t faultline-runtime:0.1.0 .
 .venv/bin/faultline doctor
 ```
@@ -57,13 +58,15 @@ Use exactly one cleanup selector: `--run` for one recorded run or `--stale` for 
 
 Recovery must use the original output root recorded in the manifest. Copied/moved bundles and legacy bundles without `execution_root` are refused for automatic cleanup because their original lock cannot be established. Completed reports remain portable and readable without this recovery metadata.
 
+New runs save creation intents before contacting Docker. If a crash loses the returned resource ID, cleanup can inspect the exact recorded name, verify all ownership and creation-token labels, and durably bind the ID before deletion. Later recovery keeps those IDs in `<output>/cleanup/bindings/`; preserve that directory with the manifests and receipts. An absent unresolved creation remains incomplete because Docker could still finish the request later. See the [ELI5 creation recovery guide](docs/learning/creation-recovery.md).
+
 Run/report exit codes: **0 PASS**, **1 FAIL**, **2 invalid input/preflight**, **3 INCONCLUSIVE**, **4 ERROR**, **130 interrupted**. Missing fault coverage cannot produce PASS. Cleanup failures produce ERROR while retaining available findings. Validation rejects features not implemented in this milestone.
 
 The engine uses a checked order-adapter boundary. `faultline --format json validate examples/orders/control.yaml` shows its supported capabilities without Docker. Incomplete or malformed grading results produce ERROR, even if the returned subset says PASS. Projects can select the built-in adapter or a separately installed trusted Python package through the `faultline.adapters` entry-point group. Exact package versions, unambiguous registrations, bounded file provenance, and a ten-second adapter preflight are checked before Docker. See the [ELI5 adapter guide](docs/learning/adapters.md) and [installation tutorial](docs/learning/installed-adapters.md).
 
 ## Configure a project
 
-The [runnable project example](examples/orders/faultline.project.yaml) declares the current four-service order environment, variant images, container resources, and project budget ceilings:
+The [runnable project example](examples/orders/faultline.project.yaml) declares the five-service order environment, variant images, container resources, and project budget ceilings:
 
 ```bash
 uv run faultline --project examples/orders/faultline.project.yaml --format json validate lost-response.yaml
@@ -75,9 +78,11 @@ With a project, the scenario path is relative to the project file's directory an
 
 Project limits cap scenario budgets. Omitted scenario defaults are clipped to those ceilings; explicit over-ceiling requests are rejected. JSON validation shows effective limits and the plan/configuration hashes. Docker enforces declared memory, CPU, and PID limits. Preflight resolves selected local application images to immutable IDs and checks architecture/host capacity without pulling images.
 
-This is a restricted order-profile manifest, not the complete v1 project/adapter API. The helper/database images, role bindings, route, permissions, and readiness methods remain constrained. Installed adapters must implement this same bridge; proxy topology, additional domains, custom environment mappings, extra writable paths, and readiness overrides remain unsupported. A custom local application image must conform to the existing order fixture. Read the [ELI5 project guide](docs/learning/projects.md) for exact settings, image requirements, path rules, and examples.
+The engine uses five owned service roles and four internal networks. Applications reach PostgreSQL through the pinned Toxiproxy; the observer reaches it independently. Local compatible images are resolved to immutable IDs before provisioning. Arbitrary endpoints, host mounts, privileged services, and production targets are not accepted.
 
-Offline reporting and scoped cleanup use recorded evidence and ownership without loading project YAML or adapters. They remain usable when the project file changes or the adapter package is uninstalled. The [separate example package](examples/installed-orders-adapter/pyproject.toml) demonstrates this bridge using the existing order hooks; it is not an independent verifier or application.
+See [the experiment-engine learning guide](docs/learning/experiment-engine.md) for plan materialization, bounded concurrent admission, barriers, conditional retries, fault acknowledgments, and in-flight registration. The [external adapter tutorial](docs/learning/external-adapters.md) documents public hooks and runs a separately packaged counter application with its own database schema and verifier.
+
+Offline reporting and scoped cleanup use recorded evidence without importing a project adapter. The older inherited order-adapter example remains useful for packaging and malformed-grader checks; the independent counter example exercises actual domain onboarding.
 
 ## Time budgets
 
@@ -100,7 +105,7 @@ The Linux/WSL coordinator runs on the main Python thread and refuses to take ove
 
 ## Verification
 
-See the [installed-adapter acceptance results](docs/installed-adapter-acceptance-results.md) for the latest validation, and the earlier [initial](docs/acceptance-results.md), [recovery](docs/recovery-acceptance-results.md), [deadline](docs/deadline-acceptance-results.md), [adapter](docs/adapter-acceptance-results.md), and [project](docs/project-acceptance-results.md) results for their measured phases and retained evidence.
+See the [M2 acceptance results](docs/m2-acceptance-results.md) for the 38-case full Docker regression, final four-case follow-up, and 299 passing unit tests. Earlier [initial](docs/acceptance-results.md), [recovery](docs/recovery-acceptance-results.md), [deadline](docs/deadline-acceptance-results.md), [adapter](docs/adapter-acceptance-results.md), [project](docs/project-acceptance-results.md), [installed-adapter](docs/installed-adapter-acceptance-results.md), and [creation-recovery](docs/creation-recovery-acceptance-results.md) results retain their separate measurements.
 
 ```bash
 uv run ruff check src tests
@@ -116,6 +121,6 @@ FAULTLINE_INTEGRATION=1 FAULTLINE_ACCEPTANCE_REPEATS=20 \
   uv run pytest -x -s -q tests/test_integration.py
 ```
 
-Every trial creates and removes its own database, application, worker, observer, and networks. Tests verify actual ledger totals, fault coverage, report integrity, and absence of owned leftovers. Independent verifier fixtures also test duplicate records, orphan effects, false success responses, lost updates, missing evidence, and a backend that performs no work.
+Every trial creates and removes its own database, application, proxy, worker, observer, and networks. Tests verify actual ledger totals, fault coverage, report integrity, and absence of owned leftovers. Independent verifier fixtures also test duplicate records, orphan effects, false success responses, lost updates, missing evidence, and a backend that performs no work.
 
-Use only trusted local application images and synthetic fixtures; dependency/helper images remain constrained to the bundled profile. There is no arbitrary endpoint or production target option. The remaining release work—public adapters, concurrent scenario scheduling, Toxiproxy faults, strict replay, reduction, React, and CI packaging—is tracked in the specification and implementation-status document.
+Use only trusted local compatible images and synthetic fixtures. There is no arbitrary endpoint or production target option. Two milestones remain: M3 adds strict replay, reduction, and React investigation; M4 adds independent correct-B/transfer validation, the defect corpus, and CI/release packaging. See the specification and implementation-status document for the remaining gates.

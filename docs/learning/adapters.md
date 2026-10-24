@@ -1,3 +1,5 @@
+> M2 update: the order-only bridge described below has been extended. Quiescence now returns ready/pending/unknown with evidence; baseline hashes are planned; the checked verifier requires each invariant for every logical identity. See [the current external adapter contract](external-adapters.md).
+
 # Why Faultline needs an adapter
 
 Imagine Faultline as a laboratory supervisor. The supervisor knows how to book the room, start a stopwatch, interrupt an experiment, record observations, and put the equipment away. A lab assistant knows the particular experiment: which starting data to create and which business rules to check.

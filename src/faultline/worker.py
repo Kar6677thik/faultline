@@ -5,7 +5,9 @@ HTTP attempt's deadline. Docker's eight-byte stdout framing is decoded explicitl
 """
 
 import json
+import queue
 import struct
+import threading
 import time
 from uuid import uuid4
 
@@ -24,12 +26,35 @@ class WorkerSession:
         self.connection = api.exec_start(command["Id"], socket=True, tty=False)
         self.socket = getattr(self.connection, "_sock", self.connection)
         self.buffer = bytearray()
+        self.pending = {}
+        self.lock = threading.Lock()
+        self.send_lock = threading.Lock()
+        self.failure = None
         try:
-            if self.read_message(10) != {"protocol_version": 1, "ready": True}:
+            if self.read_message(10) != {"protocol_version": 2, "ready": True, "max_in_flight": 32}:
                 raise RuntimeError("unsupported worker handshake")
         except BaseException:
             self.close()
             raise
+        threading.Thread(target=self._receive, daemon=True).start()
+
+    def _receive(self):
+        try:
+            while True:
+                message = self.read_message(900)
+                with self.lock:
+                    request_id = message.get("request_id")
+                    if message.get("protocol_version") != 2 or request_id not in self.pending:
+                        raise RuntimeError("worker response correlation mismatch")
+                    self.pending[request_id].put_nowait(message)
+        except Exception as exc:
+            with self.lock:
+                self.failure = exc
+                for mailbox in self.pending.values():
+                    try:
+                        mailbox.put_nowait(exc)
+                    except queue.Full:
+                        pass
 
     def read_exact(self, count, deadline):
         result = bytearray()
@@ -61,12 +86,33 @@ class WorkerSession:
 
     def request(self, request, timeout):
         request_id = str(uuid4())
-        message = {"protocol_version": 1, "request_id": request_id, "request": request}
-        self.socket.settimeout(timeout)
-        self.socket.sendall(json.dumps(message).encode() + b"\n")
-        response = self.read_message(timeout)
-        if response.get("protocol_version") != 1 or response.get("request_id") != request_id:
-            raise RuntimeError("worker response correlation mismatch")
+        message = {"protocol_version": 2, "request_id": request_id, "request": request}
+        mailbox = queue.Queue(maxsize=3)
+        deadline = time.monotonic() + timeout
+        with self.lock:
+            if self.failure is not None:
+                raise RuntimeError("worker stream failed") from self.failure
+            if len(self.pending) >= 32:
+                raise RuntimeError("worker capacity exceeded")
+            self.pending[request_id] = mailbox
+        try:
+            with self.send_lock:
+                self.socket.sendall(json.dumps(message).encode() + b"\n")
+            messages = []
+            for _ in range(2):
+                try:
+                    item = mailbox.get(timeout=max(0, deadline - time.monotonic()))
+                except queue.Empty as exc:
+                    raise TimeoutError("worker acknowledgment/result deadline exceeded") from exc
+                if isinstance(item, Exception):
+                    raise RuntimeError("worker stream failed") from item
+                messages.append(item)
+            acknowledgment, response = messages
+            if acknowledgment.get("accepted") is not True or "result" in acknowledgment:
+                raise RuntimeError("worker did not acknowledge admission")
+        finally:
+            with self.lock:
+                self.pending.pop(request_id, None)
         result = response.get("result")
         if not isinstance(result, dict) or result.get("outcome") not in {
             "http_response",

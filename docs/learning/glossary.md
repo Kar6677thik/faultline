@@ -4,6 +4,10 @@
 
 **Entry point:** an installed package's address card mapping a short name to a Python factory. Faultline looks up the selected name without importing unselected adapter modules. See the [installation guide](installed-adapters.md).
 
+**Creation intent:** a record saved before a Docker create request, including the exact name, job, kind, and unique creation token. It permits narrowly scoped inspection if the returned ID is lost; it does not itself authorize deletion.
+
+**Recovery binding:** a durable connection between a recorded creation intent and the resource's full immutable Docker ID. Later cleanup reuses this ID rather than looking up a possibly reused name. See [creation recovery](creation-recovery.md).
+
 **Wheel and RECORD:** a wheel is an installable Python package archive. Its RECORD is the file list used to inspect the installed package. Faultline hashes actual bytes and refuses missing measured files rather than trusting that list's declared hashes.
 
 **Capability:** an explicit declaration of what an adapter can handle, such as an operation, fault, fixture, or invariant version. Unsupported requests are refused before provisioning.

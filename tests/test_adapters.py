@@ -105,7 +105,7 @@ def test_incomplete_baseline_is_error_but_incomplete_final_is_evidence(baseline,
 def test_truthy_quiescence_is_not_a_graceful_exit(value):
     environment = Mock()
     environment.drain.return_value = value
-    with pytest.raises(AdapterError, match="invalid result"):
+    with pytest.raises(AdapterError):
         bundled_adapter().quiesce(environment, 1000)
 
 

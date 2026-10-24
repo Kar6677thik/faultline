@@ -44,15 +44,15 @@ def local_project(tmp_path, project_document):
         lambda p: p["adapter"].update(package_version="0.0.0"),
         lambda p: p["services"].append(deepcopy(p["services"][0])),
         lambda p: p["services"][1].update(id="application"),
-        lambda p: p["services"][1].update(image="postgres:latest"),
-        lambda p: p["services"][2].update(image="other-helper:1"),
+        lambda p: p["services"][1].update(image="https://remote.example/postgres"),
+        lambda p: p["services"][2].update(image="unversioned-helper"),
         lambda p: p["services"][0].update(privileged=True),
         lambda p: p["services"][0].update(network_mode="host"),
         lambda p: p["services"][0].update(volumes=["/:/host"]),
         lambda p: p["services"][0].update(writable_paths=["/var/run/docker.sock"]),
         lambda p: p["services"][0].update(environment={"FL_APP_PASSWORD": "secret-token"}),
         lambda p: p["services"][0]["readiness"].update(command="touch /host/file"),
-        lambda p: p["services"][0]["readiness"].update(timeout_ms=2000),
+        lambda p: p["services"][0]["readiness"].update(timeout_ms=0),
         lambda p: p["services"][0]["resources"].update(memory_bytes=2**30),
         lambda p: p["services"][0]["resources"].update(cpu_millis="500"),
         lambda p: p["services"][0]["resources"].update(pids_limit=True),
@@ -60,10 +60,11 @@ def local_project(tmp_path, project_document):
         lambda p: p["routes"][0].update(base_path="/%2e%2e/"),
         lambda p: p["routes"][0].update(service="database"),
         lambda p: p["routes"][0].update(port=5432),
+        lambda p: p["routes"].append(deepcopy(p["routes"][0])),
         lambda p: p["variants"]["correct"].update(application_image="https://host/image:1"),
         lambda p: p["variants"]["correct"].update(application_image="untagged"),
         lambda p: p["limits"].update(total_ms=None),
-        lambda p: p["limits"].update(max_operations=2),
+        lambda p: p["limits"].update(max_operations=1001),
         lambda p: p["scenario_paths"].append(p["scenario_paths"][0]),
     ],
 )
@@ -284,7 +285,12 @@ def test_resource_settings_and_project_label_reach_docker(tmp_path, project_docu
     env = Environment(client, bundle, {"runtime": "helper-id", "application": "app-id"}, project)
     env.networks = {"client": Mock(id="client-id")}
     container = Mock(id="a" * 64, attrs={"Config": {"Labels": env.labels}})
-    client.containers.create.return_value = container
+
+    def create(*args, **kwargs):
+        container.attrs = {"Name": "/" + kwargs["name"], "Config": {"Labels": kwargs["labels"]}}
+        return container
+
+    client.containers.create.side_effect = create
     env.create_container("application", ["client"])
     assert client.containers.create.call_args.args == ("app-id",)
     settings = client.containers.create.call_args.kwargs

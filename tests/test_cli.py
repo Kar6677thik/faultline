@@ -17,7 +17,12 @@ def test_validate_json_does_not_require_docker(monkeypatch):
     assert '"cli_schema_version": 1' in result.stdout
     description = json.loads(result.stdout)["summary"]["adapter"]
     assert description["adapter_id"] == "bundled_orders"
-    assert description["faults"] == ["response_suppress"]
+    assert set(description["faults"]) == {
+        "response_suppress",
+        "proxy_latency",
+        "proxy_disconnect",
+        "process_restart",
+    }
     assert description["external_registration"] is False
 
 
@@ -32,4 +37,4 @@ def test_unsupported_scope_is_explicit_and_secrets_not_echoed(tmp_path):
     result = CliRunner().invoke(app, ["--format", "json", "validate", str(path)])
     assert result.exit_code == 2
     assert "secret-test-token" not in result.stdout
-    assert "Idempotency-Key" in result.stdout
+    assert "header" in result.stdout

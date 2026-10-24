@@ -161,8 +161,26 @@ def resolve_adapter(project=None, scenario=None, variant=None):
                 adapter, identity = _load_installed(selection)
             if project and not set(project.variants) <= set(adapter.description.variants):
                 raise ValueError("Project variants require unsupported adapter capabilities")
+            if project and any(
+                service.readiness.check not in adapter.description.readiness_checks
+                for service in project.services
+            ):
+                raise ValueError("Project requests an unregistered readiness check")
             if scenario is not None:
                 adapter.validate(scenario, variant)
+                if project:
+                    from faultline.models import safe_path
+
+                    routes = {route.id: route for route in project.routes}
+                    for operation in scenario.all_operations:
+                        route = routes.get(operation.route)
+                        path = safe_path(operation.request.path)
+                        if route is None or (
+                            route.base_path != "/"
+                            and path != route.base_path
+                            and not path.startswith(route.base_path.rstrip("/") + "/")
+                        ):
+                            raise ValueError("operation escapes its declared application route")
             return adapter, identity
     except DeadlineExceeded as exc:
         raise AdapterError(

@@ -1,0 +1,64 @@
+{
+  "schema_version": 1,
+  "id": "proxy_disconnect",
+  "adapter_profile": "orders_v1",
+  "fixture": "standard_wallet",
+  "seed": 42,
+  "operations": [
+    {
+      "id": "purchase_a",
+      "kind": "create_order",
+      "logical_id": "purchase-a",
+      "route": "orders_api",
+      "request": {
+        "method": "POST",
+        "path": "/orders",
+        "headers": {
+          "Idempotency-Key": "purchase-a-key"
+        },
+        "json": {
+          "purchase_id": "purchase-a",
+          "account_id": "buyer-a",
+          "sku": "sku-a",
+          "quantity": 1
+        }
+      },
+      "timeout_ms": 1000,
+      "after_faults": [
+        "impair"
+      ],
+      "retry": {
+        "max_attempts": 3,
+        "on": [
+          "timeout",
+          "connection_error",
+          "http_503"
+        ],
+        "backoff_ms": [
+          1000,
+          1000
+        ]
+      }
+    }
+  ],
+  "invariants": [
+    "orders.at_most_one_debit",
+    "orders.purchase_atomicity",
+    "orders.wallet_conservation",
+    "orders.inventory_conservation",
+    "orders.confirmation_intent",
+    "orders.idempotency_contract",
+    "orders.completed_purchase"
+  ],
+  "faults": [
+    {
+      "id": "impair",
+      "kind": "proxy_disconnect",
+      "target": "database",
+      "trigger": {
+        "offset_ms": 0
+      },
+      "duration_ms": 500
+    }
+  ]
+}

@@ -1,8 +1,4 @@
-"""Checked order-profile bridge, narrower than the full public v1 adapter contract.
-
-The bridge deliberately describes the existing synchronous order profile, not the
-full public v1 API. Docker ownership and deadlines remain the engine's responsibility.
-"""
+"""Checked trusted adapter hooks; ownership and deadlines remain engine responsibilities."""
 
 import hashlib
 import json
@@ -12,7 +8,16 @@ from typing import Annotated, Literal
 from pydantic import Field, JsonValue, model_validator
 
 from faultline import __version__, verifier
-from faultline.models import INVARIANTS, Identifier, Scenario, StrictModel, canonical_bytes, digest
+from faultline.models import (
+    INVARIANTS,
+    Identifier,
+    Operation,
+    Purchase,
+    Scenario,
+    StrictModel,
+    canonical_bytes,
+    digest,
+)
 
 PositiveVersion = Annotated[int, Field(ge=1)]
 Nonempty = Annotated[str, Field(min_length=1, max_length=1024)]
@@ -39,6 +44,7 @@ class Description(StrictModel):
     profile: Identifier
     fixture: Identifier
     fixture_version: PositiveVersion
+    fixture_hash: Hash
     operations: list[Identifier]
     faults: list[Identifier]
     invariants: dict[str, PositiveVersion]
@@ -47,6 +53,16 @@ class Description(StrictModel):
     authority: Literal["postgresql"]
     quiescence: Literal["graceful_process_exit_and_database_sessions"]
     external_registration: bool
+    generators: dict[str, PositiveVersion] = Field(default_factory=dict)
+    readiness_checks: list[Identifier] = Field(
+        default_factory=lambda: [
+            "orders_health",
+            "postgres_ready",
+            "worker_handshake",
+            "observer_snapshot",
+            "proxy_ready",
+        ]
+    )
 
 
 class Failure(StrictModel):
@@ -98,6 +114,11 @@ class Snapshot(StrictModel):
     application_sessions: Annotated[int, Field(ge=0)]
 
 
+class Quiescence(StrictModel):
+    state: Literal["ready", "pending", "unknown"]
+    evidence: Annotated[list[Nonempty], Field(min_length=1, max_length=100)]
+
+
 def detached_json(value):
     """Bound returned evidence and prevent later mutation through shared containers."""
     raw = canonical_bytes(value)
@@ -145,19 +166,68 @@ class OrdersAdapter:
             "profile": "orders_v1",
             "fixture": "standard_wallet",
             "fixture_version": 1,
+            "fixture_hash": digest(
+                {
+                    "accounts": [{"account_id": "buyer-a", "balance_minor": 1000000}],
+                    "products": [{"sku": "sku-a", "price_minor": 200000, "stock": 10}],
+                    **{
+                        name: []
+                        for name in ("orders", "ledger", "movements", "outbox", "idempotency")
+                    },
+                }
+            ),
             "operations": ["create_order"],
-            "faults": ["response_suppress"],
+            "faults": ["response_suppress", "proxy_latency", "proxy_disconnect", "process_restart"],
             "invariants": dict.fromkeys(INVARIANTS, 1),
             "variants": ["unsafe", "correct"],
-            "concurrency": 1,
+            "concurrency": 32,
             "authority": "postgresql",
             "quiescence": "graceful_process_exit_and_database_sessions",
             "external_registration": False,
+            "generators": {"orders.purchases": 1},
         }
 
     def validate(self, scenario):
         # Recheck even direct Python callers that used model_copy without validation.
         Scenario.model_validate(scenario.model_dump(by_alias=True))
+        identities = {}
+        for operation in scenario.all_operations:
+            request = operation.request
+            body = request.body.model_dump()
+            if operation.expectation not in {
+                "success",
+                "insufficient_funds",
+                "insufficient_stock",
+                "invalid_quantity",
+                "idempotency_conflict",
+                "purchase_conflict",
+            }:
+                raise ValueError("unsupported order expectation")
+            if operation.expectation == "invalid_quantity":
+                if (
+                    not isinstance(body, dict)
+                    or type(body.get("quantity")) is not int
+                    or body["quantity"] > 0
+                ):
+                    raise ValueError("invalid_quantity must supply a nonpositive integer quantity")
+                Purchase.model_validate({**body, "quantity": 1})
+            else:
+                Purchase.model_validate(body)
+            if operation.logical_id != body["purchase_id"]:
+                raise ValueError("logical_id must equal purchase_id")
+            if operation.expectation == "success":
+                if operation.logical_id in identities and identities[operation.logical_id] != body:
+                    raise ValueError("conflicting payloads require explicit conflict expectations")
+                identities[operation.logical_id] = body
+            headers = {k.lower(): v for k, v in request.headers.items()}
+            if (
+                request.method != "POST"
+                or request.path != "/orders"
+                or operation.route != "orders_api"
+                or set(headers) != {"idempotency-key"}
+                or not 1 <= len(headers["idempotency-key"]) <= 128
+            ):
+                raise ValueError("order operations require POST /orders and an Idempotency-Key")
 
     def prepare(self, environment, variant):
         result = environment.call("observer", "prepare", variant, timeout=10)
@@ -175,7 +245,10 @@ class OrdersAdapter:
         environment.wait_application_ready()
 
     def quiesce(self, environment, timeout_ms):
-        return environment.drain(timeout_ms)
+        result = environment.drain(timeout_ms)
+        if type(result) is not bool:
+            raise ValueError("drain must return a boolean")
+        return {"state": "ready" if result else "unknown", "evidence": ["history.ndjson"]}
 
     def snapshot(self, environment, role):
         snapshot = environment.snapshot(role)
@@ -220,17 +293,64 @@ class CheckedAdapter:
 
     def validate(self, scenario, variant=None):
         descriptor = self.description
+        if scenario.generators:
+            generated, identities = [], []
+            for generator in scenario.generators:
+                if generator.kind not in descriptor.generators:
+                    raise ValueError("Scenario requires an unregistered generator")
+                version = descriptor.generators[generator.kind]
+                if generator.kind == "orders.purchases" and version == 1:
+                    operations = generator.expand(scenario.seed)
+                    algorithm = "sha256-counter-v1"
+                else:
+
+                    def expansion(value, version=version, count=generator.count):
+                        value = detached_json(value)
+                        if (
+                            not isinstance(value, dict)
+                            or set(value) != {"operations", "version", "algorithm"}
+                            or type(value["version"]) is not int
+                            or value["version"] != version
+                            or not isinstance(value["algorithm"], str)
+                            or not 1 <= len(value["algorithm"]) <= 128
+                            or not isinstance(value["operations"], list)
+                            or len(value["operations"]) != count
+                        ):
+                            raise ValueError("invalid registered generator expansion")
+                        return [Operation.model_validate(op) for op in value["operations"]], value[
+                            "algorithm"
+                        ]
+
+                    operations, algorithm = self._call(
+                        "expand", expansion, generator.model_dump(), scenario.seed
+                    )
+                generated.extend(operations)
+                identities.append({**generator.model_dump(), "version": version, "prng": algorithm})
+            scenario.materialize_generators(generated, identities)
         if (
             scenario.adapter_profile != descriptor.profile
             or scenario.fixture != descriptor.fixture
             or scenario.concurrency > descriptor.concurrency
-            or any(op.kind not in descriptor.operations for op in scenario.operations)
+            or any(op.kind not in descriptor.operations for op in scenario.all_operations)
             or any(f.kind not in descriptor.faults for f in scenario.faults)
+            or any(g.kind not in descriptor.generators for g in scenario.generators)
             or set(scenario.invariants) != set(descriptor.invariants)
             or (variant is not None and variant not in descriptor.variants)
         ):
             raise ValueError("Scenario or variant requires unsupported adapter capabilities")
         self._call("validate", self._nothing, scenario)
+        scenario.bind_adapter_plan(
+            {
+                "adapter_id": descriptor.adapter_id,
+                "boundary_version": descriptor.boundary_version,
+                "profile": descriptor.profile,
+                "fixture": descriptor.fixture,
+                "fixture_version": descriptor.fixture_version,
+                "fixture_hash": descriptor.fixture_hash,
+                "invariants": descriptor.invariants,
+                "generators": descriptor.generators,
+            }
+        )
 
     @staticmethod
     def _nothing(value):
@@ -246,12 +366,12 @@ class CheckedAdapter:
         self._call("readiness", self._nothing, environment)
 
     def quiesce(self, environment, timeout_ms):
-        def boolean(value):
-            if type(value) is not bool:
-                raise ValueError("quiesce must report a boolean graceful-exit result")
-            return value
-
-        return self._call("quiesce", boolean, environment, timeout_ms)
+        return self._call(
+            "quiesce",
+            lambda value: Quiescence.model_validate(detached_json(value)).model_dump(),
+            environment,
+            timeout_ms,
+        )
 
     def snapshot(self, environment, role):
         return self._call("snapshot", lambda value: self._snapshot(value, role), environment, role)
@@ -267,6 +387,8 @@ class CheckedAdapter:
             raise ValueError("snapshot row counts do not match records")
         if role == "baseline" and (not snapshot.complete or not snapshot.quiescent):
             raise ValueError("baseline must be complete and quiescent")
+        if role == "baseline" and snapshot.content_hash != self.description.fixture_hash:
+            raise ValueError("baseline differs from the planned fixture digest")
         if snapshot.adapter_profile != self.description.profile:
             raise ValueError("snapshot profile mismatch")
         if snapshot.fixture != self.description.fixture:
@@ -278,16 +400,19 @@ class CheckedAdapter:
     def verify(self, scenario, baseline, final, attempts, *, workload_complete):
         def findings(value):
             value = detached_json(value)
-            if type(value) is not list or len(value) != len(scenario.invariants):
+            expected = {
+                (name, op.logical_id)
+                for name in scenario.invariants
+                for op in scenario.all_operations
+            }
+            if type(value) is not list or len(value) != len(expected):
                 raise ValueError("verifier must return exactly one result per required invariant")
             checked = [Finding.model_validate(item) for item in value]
-            if {item.invariant_id for item in checked} != set(scenario.invariants):
+            if {(item.invariant_id, item.logical_id) for item in checked} != expected:
                 raise ValueError("missing, duplicate, or unexpected invariant results")
             for item in checked:
                 if item.version != self.description.invariants[item.invariant_id]:
                     raise ValueError("unsupported invariant version")
-                if item.logical_id != scenario.operations[0].logical_id:
-                    raise ValueError("finding does not match the requested logical operation")
             return [item.model_dump(exclude_none=True) for item in checked]
 
         return self._call(

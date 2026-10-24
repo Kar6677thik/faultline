@@ -1,0 +1,92 @@
+{
+  "schema_version": 1,
+  "id": "concurrent_purchases",
+  "adapter_profile": "orders_v1",
+  "fixture": "standard_wallet",
+  "seed": 42,
+  "operations": [
+    {
+      "id": "purchase_0",
+      "kind": "create_order",
+      "logical_id": "purchase-0",
+      "route": "orders_api",
+      "request": {
+        "method": "POST",
+        "path": "/orders",
+        "headers": {
+          "Idempotency-Key": "purchase-0-key"
+        },
+        "json": {
+          "purchase_id": "purchase-0",
+          "account_id": "buyer-a",
+          "sku": "sku-a",
+          "quantity": 1
+        }
+      },
+      "timeout_ms": 1000,
+      "barrier": "together"
+    },
+    {
+      "id": "purchase_1",
+      "kind": "create_order",
+      "logical_id": "purchase-1",
+      "route": "orders_api",
+      "request": {
+        "method": "POST",
+        "path": "/orders",
+        "headers": {
+          "Idempotency-Key": "purchase-1-key"
+        },
+        "json": {
+          "purchase_id": "purchase-1",
+          "account_id": "buyer-a",
+          "sku": "sku-a",
+          "quantity": 1
+        }
+      },
+      "timeout_ms": 1000,
+      "barrier": "together"
+    },
+    {
+      "id": "purchase_2",
+      "kind": "create_order",
+      "logical_id": "purchase-2",
+      "route": "orders_api",
+      "request": {
+        "method": "POST",
+        "path": "/orders",
+        "headers": {
+          "Idempotency-Key": "purchase-2-key"
+        },
+        "json": {
+          "purchase_id": "purchase-2",
+          "account_id": "buyer-a",
+          "sku": "sku-a",
+          "quantity": 1
+        }
+      },
+      "timeout_ms": 1000,
+      "barrier": "together"
+    }
+  ],
+  "invariants": [
+    "orders.at_most_one_debit",
+    "orders.purchase_atomicity",
+    "orders.wallet_conservation",
+    "orders.inventory_conservation",
+    "orders.confirmation_intent",
+    "orders.idempotency_contract",
+    "orders.completed_purchase"
+  ],
+  "concurrency": 3,
+  "barriers": [
+    {
+      "id": "together",
+      "members": [
+        "purchase_0",
+        "purchase_1",
+        "purchase_2"
+      ]
+    }
+  ]
+}
