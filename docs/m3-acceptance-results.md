@@ -1,8 +1,17 @@
-# M3 acceptance results (in progress)
+# M3 acceptance results
 
-This page records measured M3 evidence as each part lands. Targets from
-`specs/10-delivery.md` are not results; anything not listed here has not been
-demonstrated yet.
+This page records measured M3 evidence. Targets from `specs/10-delivery.md` are not
+results; anything not listed here has not been demonstrated.
+
+| Gate | Evidence |
+| --- | --- |
+| AT-014 replay fidelity | Phase A unit rejections; real replay/comparison (Phases A, B, final) |
+| AT-015 honest frequency | `tests/test_groups.py` controlled mixture |
+| AT-016 smaller reproduction | Real 20 to 1 verified reductions (Phase B, final) |
+| AT-017 reduction integrity | `tests/test_reduction.py` |
+| AT-018 artifact robustness | `tests/test_server.py`, `read_bundle` |
+| AT-019 viewer investigation | `web/src/test/viewer.test.tsx` (jsdom) |
+| AT-020 local web boundary | `tests/test_server.py`, real `serve` smoke test |
 
 ## Phase A: strict replay, comparison, and repeat groups (2026-10-29)
 
@@ -108,7 +117,82 @@ The reduction took 12.5 minutes, longer than the default 10-minute budget. With 
 limits it would have stopped early and reported that honestly; the acceptance test
 raises the wall budget explicitly.
 
-### Not yet demonstrated
+## Phase C: read-only API, viewer, and artifact robustness (2026-10-29)
 
-The expanded artifact robustness checks (AT-018), the read-only API (AT-020), and the
-React viewer (AT-019) are pending.
+### Unit and viewer evidence
+
+- `uv run pytest -q`: **349 passed, 42 Docker tests skipped**; `ruff check` and
+  `ruff format --check` passed.
+- AT-020 (`tests/test_server.py`):
+  - the token is required for `/api/*` (401); a foreign Host or Origin gets 403;
+    POST/PUT/PATCH/DELETE/OPTIONS get 405, with no CORS headers;
+  - the page sends a strict CSP and `nosniff`, contains no run data, and loads
+    nothing from another origin;
+  - artifacts are addressed only by opaque IDs, and both traversal forms return 404;
+  - an artifact changed after listing gets 422.
+- AT-018 (`tests/test_server.py` and `read_bundle`): round trip; duplicate event IDs,
+  missing attempt events, truncated last lines, and future event versions are rejected
+  even after the inventory hashes are rewritten; corrupt bundles (422) and unsupported
+  versions (409) get distinct responses.
+- API contract tests cover money and nanosecond values as decimal strings, stable
+  cursor pagination while a new run appears, RUNNING versus INTERRUPTED incomplete
+  bundles, event pagination and ETags, and snapshot bounds.
+- AT-019 (`web/src/test/viewer.test.tsx`, Vitest + Testing Library + jsdom): **19 passed**.
+  - token capture and fragment removal; the reload instruction;
+  - the loading, empty, unauthorized, not found, not ready, corrupt, unsupported,
+    server error, disconnected, and incomplete states;
+  - upstream witness versus client timeout, planned versus observed attempts,
+    ERROR with an attached violation, and PASS scope;
+  - exact 64-bit values; markup in an artifact shown as text;
+  - both group denominators and an unverified reduction labelled as unverified;
+  - a keyboard path from the run list through the run and the invariant to both
+    duplicate ledger rows.
+
+### Real evidence smoke test
+
+`faultline serve --port 0` was run against fresh real bundles (an unsafe lost-response
+run plus a 2-trial strict replay, retained under `.faultline/m3-viewer-smoke`). With
+curl:
+
+- `/health` returned 200; the API without a token returned 401, a foreign Host or Origin
+  403, and POST 405;
+- the run list showed the run and both replays, and the replay group 2/2 per started
+  trial;
+- the run detail listed four failing invariants; the final ledger had two 200000-paise
+  debits, returned as strings; events paginated with `source_monotonic_ns` as a string;
+- the SPA route and the hashed JS asset were served, and SIGINT exited with code 0.
+
+The first smoke attempt found a real defect: `serve` printed its URL before the bound
+socket was listening, so immediate connections were refused. The fix calls `listen()`
+before announcing the URL. The viewer was not walked through manually in a real
+browser for this record; its behavior evidence is the jsdom suite plus the API checks
+above.
+
+## Final M3 regression (2026-10-29)
+
+After rebuilding `faultline-runtime:0.1.0`
+(`sha256:3d8f3293c73d5e440cf27ff4ca0156566d4953dc504c86c3106b16787ce816ae`; counter image
+`sha256:b13feb77de50eaadc59e7cdd263ece5ccac10ffb663169849efb5faecdc28f8e`):
+
+`FAULTLINE_INTEGRATION=1 uv run pytest -q -m integration --basetemp=.faultline/m3-full-validation`:
+**42 passed in 1292.55 s, in one invocation on the final source** (14:42:45Z to
+15:04:22Z). These are the 40 earlier Docker cases plus the replay and reduction cases.
+Evidence is retained under `.faultline/m3-full-validation/`. Afterwards, no
+Faultline-managed containers or networks remained.
+
+In this pass:
+
+- the replay group again had 3/3 matching failures (3/3 per started trial); the
+  comparison had 2/2 PASS with differences `variant` and `platform.variant`;
+- the reduction (group `23dd08e5-d2eb-4417-97ca-b389894a2a55`) was again
+  `reduction_verified`, going from 20, 1, 21 to **1, 1, 2**. It had 5/5 baseline and
+  5/5 validation, 12 candidates (5 accepted), and 22 candidate trials (15 FAIL, 7 PASS,
+  0 INCONCLUSIVE). It used **32 trials in 515.4 s**, which happens to fit the default
+  50-trial/10-minute budget, unlike Phase B's 41 trials in 747.6 s. The two passes
+  differ because outcomes are not deterministic; neither is a performance claim.
+
+### Not demonstrated
+
+No manual real-browser accessibility audit (screen reader, 375 px device) is recorded. The
+Phase B reduction temp bundles were rotated away by pytest; their measurements come from
+the test output. The final regression's bundles are retained.

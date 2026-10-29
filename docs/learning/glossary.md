@@ -145,3 +145,9 @@
 **WSL2:** Windows Subsystem for Linux version 2. It provides the Linux execution environment used for this project's Docker experiments on Windows.
 
 **Delta debugging (ddmin):** a search that removes groups of inputs, keeps a removal if the failure persists, and splits into smaller groups when no group can be removed. Faultline's version also removes everything that depends on a deleted unit. See [reduction](reduction.md).
+
+**Bearer token / URL fragment:** a bearer token is a secret that grants access to whoever presents it. The URL fragment is the part after `#`, which browsers never send to servers. Faultline puts the viewer's token there so it stays out of logs. See [the viewer guide](viewer.md).
+
+**Origin / Host header / DNS rebinding:** the Origin header names the website that made a browser request, and the Host header names the server the request was meant for. DNS rebinding tricks a browser into sending a hostile site's requests to a local server; checking Host stops it.
+
+**Content-Security-Policy (CSP):** a response header that tells the browser which scripts, styles, and connections a page may use. Faultline's policy allows only its own packaged files.

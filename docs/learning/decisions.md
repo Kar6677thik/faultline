@@ -495,3 +495,27 @@ These are implementation decisions, explained for learning. They complement the 
 **ELI5:** if the shop closes before you finish testing, you can't claim nothing in the shop would have worked.
 
 **Reason:** the specification's defaults (50 trials, 10 minutes) are small compared with real Docker trials. Without the distinction, a budget stop would look like proof that the plan is already as small as possible. **Limit:** the time reserve uses the slowest observed trial; an even slower later trial can still exceed the wall budget, which is then recorded as the termination reason.
+
+## L-052: Serve evidence read-only, loopback-only, behind a per-launch token in the URL fragment
+
+**Choice:** `faultline serve` binds its own socket to 127.0.0.1 (no host option) and generates a random token for each launch. It prints a launch URL with the token after `#`. The middleware rejects wrong Host (403), foreign Origin (403), any method other than GET/HEAD (405), and API requests without the exact bearer token (401). It sends no CORS headers and applies a strict Content-Security-Policy. Artifacts are addressed by opaque inventory IDs and re-hashed before download.
+
+**ELI5:** a museum case you can look into but not open, in a room whose key is handed out at the door and is gone if you walk out.
+
+**Reason:** evidence can contain business data, and a local web server is reachable by every website open in your browser. Host checks stop DNS rebinding, Origin checks stop cross-site reads, and the token stops other local programs that do not have the launch URL. **Alternatives and tradeoffs:** cookies would survive reloads but are sent automatically, which reopens cross-site risks. A token in the query string would leak into logs and `Referer` headers. No authentication at all would rely only on Host/Origin. The cost is that a page reload loses access; the viewer explains how to reopen the URL rather than weakening the check.
+
+## L-053: Separate unsupported from corrupt, and check history semantics as well as hashes
+
+**Choice:** `read_bundle` raises `UnsupportedArtifact` for unknown bundle, report, or event versions (HTTP 409) and `EvidenceError` for damage (HTTP 422). It also rejects duplicate event IDs, truncated last lines, and report attempts without a recorded client outcome, even when the inventory hashes have been rewritten consistently.
+
+**ELI5:** a letter in a language you cannot read is not the same as a torn letter. And a neatly re-stapled report that cites a page which doesn't exist is still wrong.
+
+**Reason:** a newer bundle should not be called corrupt, and hashes only show that files match the inventory. **Limit:** this is integrity, not authenticity; someone who rewrites every file consistently can still forge a plausible bundle.
+
+## L-054: Ship a dependency-light React viewer as packaged static assets
+
+**Choice:** build a small React + TypeScript app (no router or state libraries) into `src/faultline/viewer/` and serve it from the wheel. It uses the History API for routes, keeps the token only in memory, and renders all artifact text through React's escaping. It paginates history, displays 64-bit values from the API's decimal strings, and gives every load state its own message.
+
+**ELI5:** the display cards are printed in advance and shipped in the box, so visitors do not need a printing press.
+
+**Reason:** reviewers should not need Node.js to look at evidence, and every third-party script would be another place untrusted code could come from. **Alternatives and tradeoffs:** server-rendered HTML would avoid JavaScript but make paginated timelines and keyboard navigation harder. A component library would speed up styling but add dependencies and assets to audit. The built assets are committed; rebuilding requires Node 20 (`web/`), and the committed bundle must be rebuilt whenever `web/src` changes.

@@ -54,6 +54,10 @@ class EvidenceError(ValueError):
     pass
 
 
+class UnsupportedArtifact(EvidenceError):
+    """A known artifact kind with an unsupported version: not corrupt, but not readable."""
+
+
 # Opening state written independently of the application's seeding code. Rows are listed
 # in primary-key order, matching the observer's canonical snapshot ordering.
 def _market_accounts():

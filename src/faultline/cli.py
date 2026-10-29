@@ -524,6 +524,53 @@ def reduce(
     )
 
 
+@app.command()
+def serve(
+    ctx: typer.Context,
+    runs_dir: Annotated[
+        Path | None, typer.Option(help="artifact root to serve; defaults to <output>/runs")
+    ] = None,
+    port: Annotated[int, typer.Option(min=0, max=65535, help="0 selects a free port")] = 8765,
+    open_browser: Annotated[bool, typer.Option("--open", help="open the launch URL")] = False,
+):
+    """Serve the read-only evidence API and viewer on 127.0.0.1 with a fresh access token."""
+    import socket
+    import webbrowser
+
+    import uvicorn
+
+    from faultline.server import create_app, new_token
+
+    root = (runs_dir or ctx.obj["output"] / "runs").resolve()
+    # The bind address is fixed: there is deliberately no option to listen externally.
+    listener = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    try:
+        listener.bind(("127.0.0.1", port))
+        # Listen before printing the URL so it is connectable as soon as it is shown.
+        listener.listen(64)
+    except OSError as exc:
+        listener.close()
+        input_error(ctx, "serve", ValueError(f"cannot bind 127.0.0.1:{port}: {exc.strerror}"))
+    actual = listener.getsockname()[1]
+    token = new_token()
+    application = create_app(root, root.parent / "groups", token, {"port": actual})
+    url = f"http://127.0.0.1:{actual}/#token={token}"
+    typer.echo(f"Serving {root} read-only. Open (keep this URL private):", err=True)
+    typer.echo(url)
+    if open_browser:
+        webbrowser.open(url)
+    server = uvicorn.Server(
+        uvicorn.Config(application, log_level="warning", access_log=False, lifespan="off")
+    )
+    try:
+        server.run(sockets=[listener])
+    except Exception as exc:
+        input_error(ctx, "serve", exc, 4)
+    finally:
+        listener.close()
+    raise typer.Exit(0)
+
+
 def read_group(value: str, output: Path) -> dict | None:
     """A UUID naming a group record (and no run) shows that group's full breakdown."""
     try:

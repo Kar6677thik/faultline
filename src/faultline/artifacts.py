@@ -10,7 +10,7 @@ from uuid import uuid4
 
 from faultline import __version__
 from faultline.models import canonical_bytes, digest
-from faultline.verifier import EvidenceError
+from faultline.verifier import EvidenceError, UnsupportedArtifact
 
 
 def utc_now() -> str:
@@ -216,9 +216,16 @@ def read_bundle(path: Path) -> tuple[dict, dict]:
     manifest_path = root / "manifest.json"
     if manifest_path.is_symlink() or manifest_path.stat().st_size > 1048576:
         raise EvidenceError("unsafe manifest")
-    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
-    if manifest.get("bundle_schema_version") != 1 or manifest.get("stage") != "completed":
-        raise EvidenceError("unsupported or incomplete bundle")
+    try:
+        manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    except (ValueError, UnicodeDecodeError) as exc:
+        raise EvidenceError("manifest is not valid JSON") from exc
+    if not isinstance(manifest, dict):
+        raise EvidenceError("manifest is not an object")
+    if manifest.get("bundle_schema_version") != 1:
+        raise UnsupportedArtifact("unsupported bundle schema version")
+    if manifest.get("stage") != "completed":
+        raise EvidenceError("incomplete bundle")
     inventory = manifest.get("artifacts", {})
     required = {"plan.json", "history.ndjson", "report.json", "report.md"}
     if not required.issubset(inventory):
@@ -237,14 +244,36 @@ def read_bundle(path: Path) -> tuple[dict, dict]:
         raw = resolved.read_bytes()
         if len(raw) != expected["bytes"] or hashlib.sha256(raw).hexdigest() != expected["sha256"]:
             raise EvidenceError(f"corrupt artifact: {name}")
-    report = json.loads((root / "report.json").read_text(encoding="utf-8"))
-    if report.get("report_schema_version") != 1 or report.get("run_id") != manifest["run_id"]:
-        raise EvidenceError("invalid report identity or version")
-    events = (root / "history.ndjson").read_text(encoding="utf-8").splitlines()
-    for index, line in enumerate(events, 1):
-        event = json.loads(line)
+    try:
+        report = json.loads((root / "report.json").read_text(encoding="utf-8"))
+        raw_history = (root / "history.ndjson").read_text(encoding="utf-8")
+        events = [json.loads(line) for line in raw_history.splitlines()]
+    except (ValueError, UnicodeDecodeError) as exc:
+        raise EvidenceError("report or history is not valid JSON") from exc
+    if report.get("report_schema_version") != 1:
+        raise UnsupportedArtifact("unsupported report schema version")
+    if report.get("run_id") != manifest["run_id"]:
+        raise EvidenceError("invalid report identity")
+    if raw_history and not raw_history.endswith("\n"):
+        raise EvidenceError("truncated last history line")
+    seen = {}
+    for index, event in enumerate(events, 1):
+        if not isinstance(event, dict):
+            raise EvidenceError("history event is not an object")
+        if event.get("event_schema_version") != 1:
+            raise UnsupportedArtifact("unsupported event schema version")
         if event.get("sequence") != index or event.get("run_id") != manifest["run_id"]:
             raise EvidenceError("invalid history sequence or identity")
-    if len(events) != report["last_sequence"]:
+        identity = event.get("event_id")
+        if identity in seen:
+            # Identical duplicates are still invalid here: sequences are already contiguous.
+            raise EvidenceError("duplicate or conflicting event identity")
+        seen[identity] = event
+    if len(events) != report.get("last_sequence"):
         raise EvidenceError("history incomplete")
+    # Every attempt the report relies on must have its recorded client observation.
+    observed = {e.get("attempt_id") for e in events if e.get("type") == "client_outcome"}
+    claimed = {a.get("attempt_id") for a in report.get("attempts", []) if isinstance(a, dict)}
+    if not claimed <= observed:
+        raise EvidenceError("report attempts are missing from the recorded history")
     return manifest, report

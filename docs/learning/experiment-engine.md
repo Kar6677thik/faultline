@@ -9,7 +9,9 @@ the experiment succeeded.
 Faultline's recipe is a **materialized plan**. Its students are HTTP attempts. Its
 equipment is disposable containers. PostgreSQL rows are the independent measurements.
 This guide describes the M2 experiment engine; it does not
-claim the complete v1 release, deterministic replay, reduction, or a React viewer.
+claim the complete v1 release or deterministic replay. Strict replay, reduction, and the
+viewer arrived in M3: see [replay](replay.md), [reduction](reduction.md), and
+[the viewer](viewer.md).
 
 ## Decide values before starting the experiment
 

@@ -79,6 +79,15 @@ Strict replay reruns the saved plan in fresh containers and refuses (exit 2, bef
 
 Reduction deletes whole operations, faults, and retry suffixes, together with anything that depends on them. A deletion is kept only if the selected violation still reproduces in three fresh runs; the best candidate is then validated five more times. Reduce exit codes: **0** verified or no smaller reproduction; **2** invalid input; **3** unstable baseline, unverified, or insufficient budget; **4** harness error. Results say "smaller reproduction", never "minimal". See the [reduction guide](docs/learning/reduction.md).
 
+## Investigate evidence in the browser
+
+```bash
+.venv/bin/faultline serve            # prints http://127.0.0.1:8765/#token=...
+.venv/bin/faultline serve --port 0   # choose a free port
+```
+
+The server is read-only and listens only on 127.0.0.1. It requires the fresh token from the printed URL, checks Host and Origin, rejects mutation methods, sends no CORS headers, and serves packaged assets with a strict Content-Security-Policy. Reloading the page drops the in-memory token; reopen the printed URL. From the run list you can reach a violation, its planned and observed attempts, the acknowledged fault, the exact baseline and final ledger rows, and replay, comparison, or reduction groups. Viewing needs no Node.js. To rebuild the viewer: `cd web && npm ci && npm test && npm run build`. See the [viewer guide](docs/learning/viewer.md).
+
 Run/report exit codes: **0 PASS**, **1 FAIL**, **2 invalid input/preflight**, **3 INCONCLUSIVE**, **4 ERROR**, **130 interrupted**. Missing fault coverage cannot produce PASS. Cleanup failures produce ERROR while retaining available findings. Validation rejects features not implemented in this milestone.
 
 The engine uses a checked order-adapter boundary. `faultline --format json validate examples/orders/control.yaml` shows its supported capabilities without Docker. Incomplete or malformed grading results produce ERROR, even if the returned subset says PASS. Projects can select the built-in adapter or a separately installed trusted Python package through the `faultline.adapters` entry-point group. Exact package versions, unambiguous registrations, bounded file provenance, and a ten-second adapter preflight are checked before Docker. See the [ELI5 adapter guide](docs/learning/adapters.md) and [installation tutorial](docs/learning/installed-adapters.md).
@@ -142,4 +151,4 @@ FAULTLINE_INTEGRATION=1 FAULTLINE_ACCEPTANCE_REPEATS=20 \
 
 Every trial creates and removes its own database, application, proxy, worker, observer, and networks. Tests verify actual ledger totals, fault coverage, report integrity, and absence of owned leftovers. Independent verifier fixtures also test duplicate records, orphan effects, false success responses, lost updates, missing evidence, and a backend that performs no work.
 
-Use only trusted local compatible images and synthetic fixtures. There is no arbitrary endpoint or production target option. Two milestones remain: M3 has strict replay, comparison, and reduction, and still adds the read-only API and React investigation; M4 adds independent correct-B/transfer validation, the defect corpus, and CI/release packaging. See the specification and implementation-status document for the remaining gates.
+Use only trusted local compatible images and synthetic fixtures. There is no arbitrary endpoint or production target option. M3 (replay, comparison, reduction, read-only API, React viewer) is complete. One milestone remains: M4 adds independent correct-B/transfer validation, the defect corpus, and CI/release packaging. See the specification and implementation-status document for the remaining gates.

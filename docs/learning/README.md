@@ -58,7 +58,7 @@ The [M2 acceptance report](../m2-acceptance-results.md) connects each milestone 
 to actual tests and measurements, including failed development trials and their fixes.
 Decisions L-037 through L-045 explain the engine's design and limits in plain language.
 
-## Replay and comparison (M3, in progress)
+## Replay, reduction, and investigation (M3)
 
 Read [replay, comparison, and honest repeat counts](replay.md) to learn why a strict
 replay refuses changed images or code, how a comparison records its differences, and
@@ -70,3 +70,8 @@ deleting whole operations, faults, and retries. You'll see why every kept deleti
 three matching fresh runs, and why running out of budget is reported differently from
 finding nothing. Decisions L-049 through L-051 cover the additional fixture, the search
 algorithm, and budgets.
+
+Finally, read [the evidence viewer and local API](viewer.md) to see why the server is
+read-only and loopback-only, how its token is handed out, and how the React viewer
+leads from a run to the exact ledger rows. Decisions L-052 through L-054 explain the
+web boundary, integrity checks, and packaging.
