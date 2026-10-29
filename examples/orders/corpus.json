@@ -7,41 +7,68 @@
       "defect": "missing_idempotency",
       "variant": "unsafe",
       "scenario": "lost-response.yaml",
-      "target": {"invariant_id": "orders.at_most_one_debit", "code": "duplicate_debit", "logical_id": "purchase-a"}
+      "target": {
+        "invariant_id": "orders.at_most_one_debit",
+        "code": "duplicate_debit",
+        "logical_id": "purchase-a"
+      }
     },
     {
       "defect": "check_then_insert_race",
       "variant": "racy_idempotency",
       "scenario": "concurrent-duplicate-slow.yaml",
-      "target": {"invariant_id": "orders.at_most_one_debit", "code": "duplicate_debit", "logical_id": "purchase-a"}
+      "target": {
+        "invariant_id": "orders.at_most_one_debit",
+        "code": "duplicate_debit",
+        "logical_id": "purchase-a"
+      }
     },
     {
       "defect": "non_atomic_side_effects",
       "variant": "non_atomic",
       "scenario": "restart-during-purchase.yaml",
-      "target": {"invariant_id": "orders.purchase_atomicity", "code": "non_atomic_purchase", "logical_id": "purchase-a"}
+      "target": {
+        "invariant_id": "orders.purchase_atomicity",
+        "code": "non_atomic_purchase",
+        "logical_id": "purchase-a"
+      }
     },
     {
       "defect": "lost_balance_update",
       "variant": "lost_update",
       "scenario": "concurrent-slow.yaml",
-      "target": {"invariant_id": "orders.wallet_conservation", "code": "balance_mismatch", "logical_id": "purchase-0"}
+      "target": {
+        "invariant_id": "orders.wallet_conservation",
+        "code": "balance_mismatch",
+        "logical_id": "purchase-0"
+      }
     },
     {
       "defect": "idempotency_payload_mismatch",
       "variant": "payload_unchecked",
       "scenario": "payload-conflict.yaml",
-      "target": {"invariant_id": "orders.idempotency_contract", "code": "inconsistent_purchase_result", "logical_id": "purchase-a"}
+      "target": {
+        "invariant_id": "orders.idempotency_contract",
+        "code": "inconsistent_purchase_result",
+        "logical_id": "purchase-a"
+      }
     },
     {
       "defect": "missing_confirmation_intent",
       "variant": "missing_outbox",
       "scenario": "control.yaml",
-      "target": {"invariant_id": "orders.confirmation_intent", "code": "outbox_mismatch", "logical_id": "purchase-a"}
+      "target": {
+        "invariant_id": "orders.confirmation_intent",
+        "code": "outbox_mismatch",
+        "logical_id": "purchase-a"
+      }
     }
   ],
   "correct": {
-    "variants": ["correct", "correct_b"],
+    "variants": [
+      "correct",
+      "correct_b"
+    ],
     "scenarios": [
       "control.yaml",
       "lost-response.yaml",
@@ -54,7 +81,8 @@
       "proxy-latency.yaml",
       "proxy-disconnect.yaml",
       "process-restart.yaml",
-      "restart-during-purchase.yaml"
+      "restart-during-purchase.yaml",
+      "regressions/reduced-duplicate-debit.yaml"
     ]
   }
 }

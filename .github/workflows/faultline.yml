@@ -1,0 +1,119 @@
+# Pull requests and manual runs only. No pull_request_target, no secrets, read-only token.
+name: faultline
+
+on:
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: faultline-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  checks:
+    name: Lint, unit, and viewer tests
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: astral-sh/setup-uv@68559e99cc807c1eb7e9238fd43a15bba460eec2 # v10.3.3
+        with:
+          version: "0.13.5"
+          python-version: "3.12"
+      - run: uv sync --frozen
+      - run: uv run ruff check src tests
+      - run: uv run ruff format --check src tests
+      # Docker-backed tests skip themselves here; the jobs below run real experiments.
+      - run: uv run pytest -q
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: "20"
+      - name: Viewer tests and packaged-asset freshness
+        working-directory: web
+        run: |
+          npm ci --no-audit --no-fund
+          npm test
+          npm run build
+          git diff --exit-code -- ../src/faultline/viewer
+
+  correct:
+    # Ordinary PR gate: every correct variant must PASS every applicable scenario.
+    name: Correct variants must pass
+    needs: checks
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: astral-sh/setup-uv@68559e99cc807c1eb7e9238fd43a15bba460eec2 # v10.3.3
+        with:
+          version: "0.13.5"
+          python-version: "3.12"
+      - run: uv sync --frozen
+      - run: scripts/build-images.sh
+      - name: Orders (correct-A and correct-B)
+        run: >-
+          uv run python -m faultline.calibration examples/orders/corpus.json
+          --only correct --trials 1 --output ci-evidence/orders-correct
+      - name: Transfers (atomic variant)
+        if: ${{ !cancelled() }}
+        run: >-
+          uv run python -m faultline.calibration examples/transfers/corpus.json
+          --only correct --trials 1 --output ci-evidence/transfers-correct
+      - name: Summary
+        if: ${{ always() }}
+        run: cat ci-evidence/*/calibration.md >> "$GITHUB_STEP_SUMMARY" || true
+      - name: Leaked resources
+        if: ${{ always() }}
+        run: |
+          test -z "$(docker ps -aq --filter label=io.faultline.managed=true)"
+          test -z "$(docker network ls -q --filter label=io.faultline.managed=true)"
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        if: ${{ always() }}
+        with:
+          name: faultline-correct-evidence
+          path: ci-evidence
+          retention-days: 7
+          if-no-files-found: warn
+
+  calibration:
+    # Known-bad variants must produce their declared violation, with no harness error.
+    name: Known defects must be detected
+    needs: checks
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: astral-sh/setup-uv@68559e99cc807c1eb7e9238fd43a15bba460eec2 # v10.3.3
+        with:
+          version: "0.13.5"
+          python-version: "3.12"
+      - run: uv sync --frozen
+      - run: scripts/build-images.sh
+      - name: Order defects
+        run: >-
+          uv run python -m faultline.calibration examples/orders/corpus.json
+          --only defects --strict --trials 1 --output ci-evidence/orders-defects
+      - name: Transfer defect
+        if: ${{ !cancelled() }}
+        run: >-
+          uv run python -m faultline.calibration examples/transfers/corpus.json
+          --only defects --strict --trials 1 --output ci-evidence/transfers-defects
+      - name: Summary
+        if: ${{ always() }}
+        run: cat ci-evidence/*/calibration.md >> "$GITHUB_STEP_SUMMARY" || true
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        if: ${{ always() }}
+        with:
+          name: faultline-calibration-evidence
+          path: ci-evidence
+          retention-days: 7
+          if-no-files-found: warn

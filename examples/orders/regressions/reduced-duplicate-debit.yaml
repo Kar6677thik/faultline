@@ -1,0 +1,87 @@
+{
+  "adapter_profile": "orders_v1",
+  "barriers": [],
+  "concurrency": 4,
+  "faults": [
+    {
+      "direction": null,
+      "downtime_ms": null,
+      "duration_ms": null,
+      "id": "hide_first_response",
+      "kind": "response_suppress",
+      "latency_ms": null,
+      "required": true,
+      "target": "orders_api",
+      "trigger": {
+        "attempt": 1,
+        "event": "upstream_response_complete",
+        "offset_ms": null,
+        "operation_id": "purchase_a",
+        "status": 201
+      }
+    }
+  ],
+  "fixture": "reduction_market",
+  "generators": [],
+  "id": "reduced_duplicate_debit_regression",
+  "invariants": [
+    "orders.at_most_one_debit",
+    "orders.purchase_atomicity",
+    "orders.wallet_conservation",
+    "orders.inventory_conservation",
+    "orders.confirmation_intent",
+    "orders.idempotency_contract",
+    "orders.completed_purchase"
+  ],
+  "limits": {
+    "artifact_bytes": 52428800,
+    "cleanup_ms": 30000,
+    "drain_ms": 10000,
+    "execution_ms": 60000,
+    "max_attempts": 5000,
+    "max_faults": 32,
+    "max_operations": 1000,
+    "observation_ms": 10000,
+    "provisioning_ms": 60000,
+    "total_ms": 300000,
+    "verification_ms": 10000
+  },
+  "operations": [
+    {
+      "after": [],
+      "after_faults": [],
+      "barrier": null,
+      "expectation": "success",
+      "id": "purchase_a",
+      "kind": "create_order",
+      "logical_id": "purchase-a",
+      "request": {
+        "headers": {
+          "Idempotency-Key": "purchase-a-key"
+        },
+        "json": {
+          "account_id": "buyer-a",
+          "purchase_id": "purchase-a",
+          "quantity": 1,
+          "sku": "sku-a"
+        },
+        "method": "POST",
+        "path": "/orders"
+      },
+      "retry": {
+        "backoff_ms": [
+          100
+        ],
+        "max_attempts": 2,
+        "on": [
+          "timeout",
+          "connection_error"
+        ]
+      },
+      "route": "orders_api",
+      "timeout_ms": 1000
+    }
+  ],
+  "schema_version": 1,
+  "seed": 42
+}
