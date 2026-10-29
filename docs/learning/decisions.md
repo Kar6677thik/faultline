@@ -535,3 +535,19 @@ These are implementation decisions, explained for learning. They complement the 
 **ELI5:** to test a smoke alarm you light a real match, not a picture of a flame. If the match is too small to notice, you hold it closer instead of painting smoke.
 
 **Reason:** a single deviation makes the cause of each detection obvious and keeps the variants honest. The first probes showed `racy_idempotency` and `lost_update` passing because the handlers were too fast to overlap. Slow, recorded network conditions are a legitimate experiment variable; secret application sleeps would turn a real defect into a staged one. **Limit:** detection under latency says nothing about how often the race happens in production traffic.
+
+## L-057: Expose the debit checkpoint through the worker, gated by declared variant capability
+
+**Choice:** add one trigger event, `adapter_checkpoint`, usable only by `process_restart` and only for checkpoints an adapter declares, per variant. The application records reached checkpoints, bound to an attempt by the existing `X-Faultline-Attempt-Id` header, and pauses for a bounded time. The fault controller polls `/_faultline/checkpoints` through the worker while the bound attempt is in flight, records an `adapter_checkpoint` event, then crashes the application.
+
+**ELI5:** to check what happens if the lights go out halfway through moving a box, you ask the mover to shout "halfway!" and then flip the switch, instead of flipping it at random and hoping.
+
+**Reason:** the window between a debit commit and a credit commit is too narrow to hit reliably with timed faults. Spec 05 permits exactly this narrow, explicit seam. **Alternatives and tradeoffs:** a log-message trigger would be implicit and unverifiable. Letting the application call the coordinator would give it control-network access. Allowing correct variants to "pass" the checkpoint scenario would count a test that cannot exercise anything. The cost is real test-only code in the application. The checkpoint message only authorizes the crash; the violation still comes from raw rows.
+
+## L-058: Bundle the transfer domain as an independent adapter rather than generalizing the order code
+
+**Choice:** the transfer application, store helper, verifier, and adapter are separate modules with their own schema, fixture, and expected opening state. They are selected with `entry_point: bundled_transfers`. The engine gained only a registry of bundled adapters and the generic checkpoint trigger.
+
+**ELI5:** a new subject gets its own textbook and answer key; the exam hall stays the same.
+
+**Reason:** AT-023 requires the same engine to judge a second domain without order-specific core code. Sharing the order verifier's helpers would hide accidental coupling. **Limit:** the transfer domain has one correct implementation, so its correct-variant evidence is narrower than the order domain's.

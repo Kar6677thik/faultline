@@ -9,7 +9,7 @@ This page describes executable behavior. The numbered files in `specs/` define t
 | M1: one trustworthy failure | Demonstrated | Original unsafe/correct PostgreSQL purchase remains a regression |
 | M2: usable experiment engine | Complete | Materialized plans, concurrency, fault controllers, public adapter integration, lifecycle evidence |
 | M3: replay, reduction, investigation | Complete | Strict replay, comparison, repeat groups, dependency-aware reduction, read-only API, React viewer |
-| M4: calibrated release and CI | In progress (order corpus and correct-B implemented; transfer domain, 20-trial calibration, CI pending) | Independent correct-B, transfer domain, defect corpus, CI/release packaging and resource measurements |
+| M4: calibrated release and CI | In progress (order corpus, correct-B, and transfer domain implemented; 20-trial calibration, CI, resource measurement pending) | Independent correct-B, transfer domain, defect corpus, CI/release packaging and resource measurements |
 
 ## Implemented behavior
 
@@ -36,6 +36,7 @@ This page describes executable behavior. The numbered files in `specs/` define t
 - `read_bundle` distinguishes unsupported versions (`UnsupportedArtifact`, API 409) from corruption (API 422). It also rejects duplicate event IDs, truncated last lines, and report attempts without recorded client outcomes.
 
 - The bundled order application has eight variants: `correct` (correct-A), the independently written `correct_b` (serializable isolation with bounded retries), and six single-defect variants (`unsafe`, `racy_idempotency`, `non_atomic`, `lost_update`, `payload_unchecked`, `missing_outbox`). `examples/orders/corpus.json` pairs each defect with a scenario and target violation and lists the scenarios both correct variants must pass. `python -m faultline.calibration` runs every trial through the CLI in fresh environments and counts detections only from completed FAILs that contain the target. Single-trial probes on 2026-10-29 detected all six defects, and both correct variants passed the new scenarios; the 20-trial calibration (AT-021/AT-022) has not been run yet.
+- A second bundled profile, `transfers_v1` (`entry_point: bundled_transfers`), has its own application, observer helper, verifier (conservation, atomicity, idempotency contract, completed transfer), and adapter, with `correct` and `non_atomic` variants and six example scenarios under `examples/transfers/`. The capability-gated `adapter_checkpoint` trigger (`transfer.debit_committed`, `process_restart` only, declared per variant) is polled through the worker while the bound attempt is in flight; the atomic variant rejects checkpoint scenarios before provisioning. Single-trial probes on 2026-10-29 detected a one-sided transfer in `non_atomic` after an acknowledged checkpoint crash, and `correct` passed the five uninstrumented scenarios.
 
 ## Supported boundaries and limitations
 

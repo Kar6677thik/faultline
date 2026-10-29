@@ -3,6 +3,9 @@
 import json
 import time
 
+CHECKPOINT_PATH = "/_faultline/checkpoints"
+CHECKPOINT_POLL_SECONDS = 0.05
+
 
 class FaultController:
     def __init__(self, environment, scenario, emit, applied, *, clock=time.monotonic):
@@ -11,6 +14,10 @@ class FaultController:
         self.fired, self.active = set(), {}
         self.restarted = set()
         self.started = None
+        self.routes = {op.id: op.route for op in scenario.all_operations}
+        # attempt_id -> checkpoint fault, only while that attempt is in flight.
+        self.watching = {}
+        self.last_poll = 0.0
 
     def start(self):
         self.started = self.clock()
@@ -20,6 +27,14 @@ class FaultController:
     def on_event(self, kind, payload, **refs):
         for fault in self.rules:
             trigger = fault.trigger
+            bound = refs.get("attempt_id") == f"{trigger.operation_id}/{trigger.attempt}"
+            if trigger.event == "adapter_checkpoint" and fault.id not in self.fired and bound:
+                # Watch the instrumented checkpoint only while the bound attempt is admitted.
+                if kind == "attempt_dispatched":
+                    self.watching[refs["attempt_id"]] = fault
+                elif kind == "client_outcome":
+                    self.watching.pop(refs["attempt_id"], None)
+                continue
             if (
                 fault.id not in self.fired
                 and trigger.event == kind
@@ -28,7 +43,56 @@ class FaultController:
             ):
                 self.apply(fault, {"event": kind, **refs})
 
+    def poll_checkpoints(self):
+        """Ask the instrumented application, via the worker, which checkpoints it reached.
+
+        The application never reaches the control network; the worker relays its answer.
+        A checkpoint message only authorizes the crash. It is never evidence of a
+        monetary violation, which the verifier still derives from raw state.
+        """
+        if not self.watching or self.clock() - self.last_poll < CHECKPOINT_POLL_SECONDS:
+            return
+        self.last_poll = self.clock()
+        attempt_id, fault = next(iter(self.watching.items()))
+        operation_id = fault.trigger.operation_id
+        reply = self.env.call(
+            "worker",
+            "http",
+            json.dumps(
+                {
+                    "route": self.routes[operation_id],
+                    "method": "GET",
+                    "path": CHECKPOINT_PATH,
+                    "timeout_ms": 1000,
+                }
+            ),
+            timeout=3,
+        )
+        if reply.get("outcome") != "http_response" or reply.get("status") != 200:
+            return
+        reached = reply.get("body", {}).get("checkpoints", [])
+        for entry in reached if isinstance(reached, list) else []:
+            if (
+                isinstance(entry, dict)
+                and entry.get("checkpoint") == fault.trigger.checkpoint
+                and entry.get("attempt_id") == attempt_id
+            ):
+                self.watching.pop(attempt_id)
+                refs = {"operation_id": operation_id, "attempt_id": attempt_id}
+                self.emit(
+                    "adapter_checkpoint",
+                    {"checkpoint": entry["checkpoint"], "acknowledgment": entry},
+                    fault_id=fault.id,
+                    **refs,
+                )
+                self.apply(
+                    fault,
+                    {"event": "adapter_checkpoint", "checkpoint": entry["checkpoint"], **refs},
+                )
+                return
+
     def tick(self):
+        self.poll_checkpoints()
         for fault, deadline in list(self.active.values()):
             if self.clock() >= deadline:
                 self.heal(fault)
@@ -42,8 +106,10 @@ class FaultController:
                 self.apply(fault, {"offset_ms": offset})
 
     def pending(self):
-        return bool(self.active) or any(
-            f.id not in self.fired and f.trigger.offset_ms is not None for f in self.rules
+        return (
+            bool(self.active)
+            or bool(self.watching)
+            or any(f.id not in self.fired and f.trigger.offset_ms is not None for f in self.rules)
         )
 
     def proxy(self, action, fault):

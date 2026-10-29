@@ -1,0 +1,105 @@
+{
+  "schema_version": 1,
+  "id": "transfer_rejections",
+  "adapter_profile": "transfers_v1",
+  "fixture": "two_accounts",
+  "seed": 7,
+  "operations": [
+    {
+      "id": "move",
+      "kind": "create_transfer",
+      "logical_id": "transfer-1",
+      "route": "transfers_api",
+      "request": {
+        "method": "POST",
+        "path": "/transfers",
+        "headers": {
+          "Idempotency-Key": "transfer-1-key"
+        },
+        "json": {
+          "transfer_id": "transfer-1",
+          "from_account_id": "acct-a",
+          "to_account_id": "acct-b",
+          "amount_minor": 250000,
+          "currency": "INR"
+        }
+      },
+      "timeout_ms": 2000
+    },
+    {
+      "id": "self",
+      "kind": "create_transfer",
+      "logical_id": "transfer-2",
+      "route": "transfers_api",
+      "request": {
+        "method": "POST",
+        "path": "/transfers",
+        "headers": {
+          "Idempotency-Key": "transfer-2-key"
+        },
+        "json": {
+          "transfer_id": "transfer-2",
+          "from_account_id": "acct-a",
+          "to_account_id": "acct-a",
+          "amount_minor": 250000,
+          "currency": "INR"
+        }
+      },
+      "timeout_ms": 2000,
+      "expectation": "invalid_request"
+    },
+    {
+      "id": "too_much",
+      "kind": "create_transfer",
+      "logical_id": "transfer-3",
+      "route": "transfers_api",
+      "request": {
+        "method": "POST",
+        "path": "/transfers",
+        "headers": {
+          "Idempotency-Key": "transfer-3-key"
+        },
+        "json": {
+          "transfer_id": "transfer-3",
+          "from_account_id": "acct-a",
+          "to_account_id": "acct-b",
+          "amount_minor": 5000000,
+          "currency": "INR"
+        }
+      },
+      "timeout_ms": 2000,
+      "expectation": "insufficient_funds"
+    },
+    {
+      "id": "reused_key",
+      "kind": "create_transfer",
+      "logical_id": "transfer-1",
+      "route": "transfers_api",
+      "request": {
+        "method": "POST",
+        "path": "/transfers",
+        "headers": {
+          "Idempotency-Key": "transfer-1-key"
+        },
+        "json": {
+          "transfer_id": "transfer-1",
+          "from_account_id": "acct-a",
+          "to_account_id": "acct-b",
+          "amount_minor": 1,
+          "currency": "INR"
+        }
+      },
+      "timeout_ms": 2000,
+      "after": [
+        "move"
+      ],
+      "expectation": "idempotency_conflict"
+    }
+  ],
+  "invariants": [
+    "transfers.conservation",
+    "transfers.atomicity",
+    "transfers.idempotency_contract",
+    "transfers.completed_transfer"
+  ]
+}

@@ -41,7 +41,9 @@ def target_found(report: dict, target: dict) -> bool:
     )
 
 
-def one_trial(scenario: Path, variant: str, output: Path, timeout: int) -> dict:
+def one_trial(
+    scenario: Path, variant: str, output: Path, timeout: int, project: Path | None = None
+) -> dict:
     started = time.monotonic()
     try:
         result = subprocess.run(
@@ -53,8 +55,10 @@ def one_trial(scenario: Path, variant: str, output: Path, timeout: int) -> dict:
                 str(output),
                 "--format",
                 "json",
+                *(["--project", str(project)] if project else []),
                 "run",
-                str(scenario),
+                # Project scenarios are named relative to the project directory.
+                scenario.name if project else str(scenario),
                 "--variant",
                 variant,
             ],
@@ -106,6 +110,7 @@ def run_corpus(
 ) -> dict:
     corpus = load_corpus(corpus_path)
     base = corpus_path.parent
+    project = base / corpus["project"] if corpus.get("project") else None
     pairs = []
     if only in {"all", "defects"}:
         pairs += [
@@ -133,7 +138,7 @@ def run_corpus(
         record["pairs"].append(entry)
         results = []
         for index in range(trials):
-            trial = one_trial(base / scenario, variant, output, timeout)
+            trial = one_trial(base / scenario, variant, output, timeout, project)
             report = trial.pop("report", None)
             if target is not None and report is not None:
                 trial["detected"] = target_found(report, target)

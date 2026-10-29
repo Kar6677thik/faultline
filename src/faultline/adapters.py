@@ -73,6 +73,11 @@ class Description(StrictModel):
     # Optional selectable fixtures besides the default `fixture`. Adapters that declare
     # any receive the selected name as `prepare(..., fixture=name)`.
     fixtures: dict[Identifier, FixtureIdentity] = Field(default_factory=dict)
+    # Instrumented checkpoints and the variants that can actually reach them.
+    checkpoints: dict[
+        Annotated[str, Field(pattern=r"^[a-z][a-z0-9_]{0,31}\.[a-z][a-z0-9_]{0,31}$")],
+        list[Identifier],
+    ] = Field(default_factory=dict)
     readiness_checks: list[Identifier] = Field(
         default_factory=lambda: [
             "orders_health",
@@ -374,6 +379,13 @@ class CheckedAdapter:
             or (variant is not None and variant not in descriptor.variants)
         ):
             raise ValueError("Scenario or variant requires unsupported adapter capabilities")
+        for name in scenario.checkpoints:
+            supported = descriptor.checkpoints.get(name)
+            if supported is None:
+                raise ValueError("Scenario uses a checkpoint this adapter does not declare")
+            if variant is not None and variant not in supported:
+                # An atomic variant has no partial state to pause at; never a passing test.
+                raise ValueError(f"Checkpoint {name} is unsupported by variant {variant}")
         self._call("validate", self._nothing, scenario)
         self.fixture = selected
         scenario.bind_adapter_plan(
@@ -386,6 +398,7 @@ class CheckedAdapter:
                 "fixture_hash": selected[2],
                 "invariants": descriptor.invariants,
                 "generators": descriptor.generators,
+                "checkpoints": scenario.checkpoints,
             }
         )
 
@@ -473,3 +486,13 @@ class CheckedAdapter:
 def bundled_adapter():
     """Reserved built-in factory; installed selection lives in adapter_loader."""
     return CheckedAdapter(OrdersAdapter())
+
+
+def bundled_transfers():
+    from faultline.transfer_adapter import TransfersAdapter
+
+    return CheckedAdapter(TransfersAdapter())
+
+
+# Reserved entry-point names for the two bundled profiles.
+BUNDLED = {"bundled_orders": bundled_adapter, "bundled_transfers": bundled_transfers}

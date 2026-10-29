@@ -109,7 +109,7 @@ def test_every_trial_is_recorded_and_summarized(monkeypatch, tmp_path):
     )
     calls = []
 
-    def fake(scenario, variant, output, timeout):
+    def fake(scenario, variant, output, timeout, project=None):
         calls.append((Path(scenario).name, variant))
         return dict(next(outcomes))
 
@@ -127,3 +127,20 @@ def test_every_trial_is_recorded_and_summarized(monkeypatch, tmp_path):
         "| missing_idempotency | `unsafe` | `lost-response.yaml` | 0 | 1 | 0 | 1 | 1/2 | yes |"
         in table
     )
+
+
+def test_transfer_corpus_pairs_validate_through_the_project():
+    from faultline.projects import load_project
+
+    path = ROOT / "examples/transfers/corpus.json"
+    corpus = load_corpus(path)
+    loaded = load_project(path.parent / corpus["project"])
+    pairs = [(d["variant"], d["scenario"]) for d in corpus["defects"]] + [
+        (variant, scenario)
+        for scenario in corpus["correct"]["scenarios"]
+        for variant in corpus["correct"]["variants"]
+    ]
+    for variant, scenario in pairs:
+        resolve_adapter(loaded.project, loaded.load_scenario(scenario), variant)
+    # The instrumented checkpoint is excluded for the atomic variant, not silently passed.
+    assert "checkpoint-restart.yaml" not in corpus["correct"]["scenarios"]

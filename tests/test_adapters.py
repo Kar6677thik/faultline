@@ -7,6 +7,7 @@ from unittest.mock import Mock
 import pytest
 
 from faultline.adapters import (
+    BUNDLED,
     AdapterError,
     CheckedAdapter,
     OrdersAdapter,
@@ -219,9 +220,7 @@ def test_hook_failure_is_reported_with_cleanup_and_identity(
         )
     else:
         setattr(implementation, broken_hook, Mock(return_value="broken-contract"))
-    monkeypatch.setattr(
-        "faultline.adapter_loader.bundled_adapter", lambda: CheckedAdapter(implementation)
-    )
+    monkeypatch.setitem(BUNDLED, "bundled_orders", lambda: CheckedAdapter(implementation))
     # No deliberate timeout needed in these harness failure checks.
     raw = scenario.model_dump(by_alias=True)
     raw["faults"] = []

@@ -82,3 +82,7 @@ Read [calibrating the judge](calibration.md) to see the known-bad order variants
 the independently written correct-B, how real races are made observable with a
 declared latency fault, and how the calibration tool counts detections. Decisions
 L-055 and L-056 record why.
+
+Then read [the transfer domain](transfers.md) to see the same engine judge a second
+business, and how an explicit checkpoint lets a crash land exactly between a debit and
+its credit. Decisions L-057 and L-058 cover the checkpoint seam and the separate adapter.

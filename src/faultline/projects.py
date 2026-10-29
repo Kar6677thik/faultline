@@ -38,7 +38,8 @@ class AdapterSelection(StrictModel):
 
     @model_validator(mode="after")
     def installed_version(self):
-        if self.entry_point == "bundled_orders" and self.package_version != __version__:
+        bundled = {"bundled_orders", "bundled_transfers"}
+        if self.entry_point in bundled and self.package_version != __version__:
             raise ValueError("adapter package_version must exactly match the installed Faultline")
         return self
 

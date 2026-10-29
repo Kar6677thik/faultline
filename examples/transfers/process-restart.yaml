@@ -1,0 +1,62 @@
+{
+  "schema_version": 1,
+  "id": "transfer_process_restart",
+  "adapter_profile": "transfers_v1",
+  "fixture": "two_accounts",
+  "seed": 7,
+  "operations": [
+    {
+      "id": "move",
+      "kind": "create_transfer",
+      "logical_id": "transfer-1",
+      "route": "transfers_api",
+      "request": {
+        "method": "POST",
+        "path": "/transfers",
+        "headers": {
+          "Idempotency-Key": "transfer-1-key"
+        },
+        "json": {
+          "transfer_id": "transfer-1",
+          "from_account_id": "acct-a",
+          "to_account_id": "acct-b",
+          "amount_minor": 250000,
+          "currency": "INR"
+        }
+      },
+      "timeout_ms": 2000,
+      "after_faults": [
+        "crash"
+      ],
+      "retry": {
+        "max_attempts": 3,
+        "on": [
+          "timeout",
+          "connection_error",
+          "http_503"
+        ],
+        "backoff_ms": [
+          1000,
+          1000
+        ]
+      }
+    }
+  ],
+  "invariants": [
+    "transfers.conservation",
+    "transfers.atomicity",
+    "transfers.idempotency_contract",
+    "transfers.completed_transfer"
+  ],
+  "faults": [
+    {
+      "id": "crash",
+      "kind": "process_restart",
+      "target": "application",
+      "trigger": {
+        "offset_ms": 0
+      },
+      "downtime_ms": 500
+    }
+  ]
+}

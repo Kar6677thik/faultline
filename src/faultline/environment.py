@@ -366,10 +366,13 @@ class Environment:
             time.sleep(readiness.poll_ms / 1000 if readiness else 0.2)
         self.call("observer", "proxy", json.dumps({"action": "prepare"}), timeout=10)
 
-    def start_application(self, variant):
+    def start_application(self, variant, checkpoints=()):
         variant_environment = (
             resolve_environment(self.project.variants[variant].environment) if self.project else {}
         )
+        if checkpoints:
+            # Instrumented pause points are enabled only for plans that declare them.
+            variant_environment["FL_CHECKPOINTS"] = ",".join(checkpoints)
         self.create_container(
             "application",
             ["client", "dependency"],

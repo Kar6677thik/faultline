@@ -15,7 +15,7 @@ import time
 from importlib import metadata
 from pathlib import Path, PurePosixPath
 
-from faultline.adapters import AdapterError, CheckedAdapter, bundled_adapter, source_identity
+from faultline.adapters import BUNDLED, AdapterError, CheckedAdapter, source_identity
 from faultline.deadlines import DeadlineExceeded, alarm_until
 from faultline.models import digest
 
@@ -155,8 +155,9 @@ def resolve_adapter(project=None, scenario=None, variant=None):
     try:
         with alarm_until("adapter_preflight", time.monotonic() + PREFLIGHT_SECONDS, "stage"):
             selection = project.adapter if project else None
-            if selection is None or selection.entry_point == "bundled_orders":
-                adapter, identity = bundled_adapter(), source_identity()
+            if selection is None or selection.entry_point in BUNDLED:
+                name = selection.entry_point if selection else "bundled_orders"
+                adapter, identity = BUNDLED[name](), source_identity()
             else:
                 adapter, identity = _load_installed(selection)
             if project and not set(project.variants) <= set(adapter.description.variants):

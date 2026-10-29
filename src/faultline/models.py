@@ -171,16 +171,28 @@ class Operation(StrictModel):
 
 
 class Trigger(StrictModel):
-    event: Literal["upstream_response_complete", "attempt_dispatched", "client_outcome"] | None = (
-        None
-    )
+    event: (
+        Literal[
+            "upstream_response_complete",
+            "attempt_dispatched",
+            "client_outcome",
+            "adapter_checkpoint",
+        ]
+        | None
+    ) = None
     operation_id: Identifier | None = None
     attempt: Annotated[int, Field(ge=1, le=5)] | None = None
     status: Annotated[int, Field(ge=200, le=299)] | None = None
     offset_ms: Annotated[int, Field(ge=0, le=300000)] | None = None
+    # Only with event "adapter_checkpoint"; the adapter must declare the checkpoint.
+    checkpoint: (
+        Annotated[str, Field(pattern=r"^[a-z][a-z0-9_]{0,31}\.[a-z][a-z0-9_]{0,31}$")] | None
+    ) = None
 
     @model_validator(mode="after")
     def one_form(self):
+        if (self.checkpoint is None) != (self.event != "adapter_checkpoint"):
+            raise ValueError("adapter_checkpoint triggers require exactly one checkpoint name")
         if self.offset_ms is not None:
             if any(
                 v is not None for v in (self.event, self.operation_id, self.attempt, self.status)
@@ -227,6 +239,8 @@ class Fault(StrictModel):
                 raise ValueError("suppression requires an exact successful response status")
         elif self.trigger.event == "upstream_response_complete":
             raise ValueError("dependency/lifecycle faults cannot trigger on upstream responses")
+        if self.trigger.event == "adapter_checkpoint" and self.kind != "process_restart":
+            raise ValueError("only process_restart may use an adapter checkpoint trigger")
         return self
 
 
@@ -487,6 +501,13 @@ class Scenario(StrictModel):
         # Saved generator provenance stays in the plan even though its values are now literal.
         if not self.generators:
             self._generation_identity = json.loads(canonical_bytes(identities))
+
+    @property
+    def checkpoints(self) -> list[str]:
+        """Instrumented checkpoints this plan relies on, for application configuration."""
+        return sorted(
+            {f.trigger.checkpoint for f in self.faults if f.trigger.checkpoint is not None}
+        )
 
     def bind_adapter_plan(self, value):
         self._adapter_plan = json.loads(canonical_bytes(value))

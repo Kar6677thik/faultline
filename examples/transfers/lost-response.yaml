@@ -1,0 +1,58 @@
+{
+  "schema_version": 1,
+  "id": "transfer_lost_response",
+  "adapter_profile": "transfers_v1",
+  "fixture": "two_accounts",
+  "seed": 7,
+  "operations": [
+    {
+      "id": "move",
+      "kind": "create_transfer",
+      "logical_id": "transfer-1",
+      "route": "transfers_api",
+      "request": {
+        "method": "POST",
+        "path": "/transfers",
+        "headers": {
+          "Idempotency-Key": "transfer-1-key"
+        },
+        "json": {
+          "transfer_id": "transfer-1",
+          "from_account_id": "acct-a",
+          "to_account_id": "acct-b",
+          "amount_minor": 250000,
+          "currency": "INR"
+        }
+      },
+      "timeout_ms": 2000,
+      "retry": {
+        "max_attempts": 2,
+        "on": [
+          "timeout"
+        ],
+        "backoff_ms": [
+          100
+        ]
+      }
+    }
+  ],
+  "invariants": [
+    "transfers.conservation",
+    "transfers.atomicity",
+    "transfers.idempotency_contract",
+    "transfers.completed_transfer"
+  ],
+  "faults": [
+    {
+      "id": "hide_first_response",
+      "kind": "response_suppress",
+      "target": "transfers_api",
+      "trigger": {
+        "event": "upstream_response_complete",
+        "operation_id": "move",
+        "attempt": 1,
+        "status": 201
+      }
+    }
+  ]
+}

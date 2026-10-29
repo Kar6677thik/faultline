@@ -115,7 +115,7 @@ def _run_one(
             baseline = adapter.prepare(env, variant)
             bundle.write("snapshots/baseline.json", baseline)
             bundle.event("baseline_captured", {"content_hash": baseline["content_hash"]})
-            env.start_application(variant)
+            env.start_application(variant, scenario.checkpoints)
             adapter.readiness(env)
             bundle.stage("ready")
         try:

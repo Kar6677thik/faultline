@@ -1,0 +1,24 @@
+{
+  "corpus_schema_version": 1,
+  "profile": "transfers_v1",
+  "project": "faultline.project.yaml",
+  "description": "The instrumented non-atomic transfer defect, and the uninstrumented scenarios the atomic transfer variant must pass. The checkpoint scenario is excluded for the correct variant because it declares the checkpoint unsupported.",
+  "defects": [
+    {
+      "defect": "non_atomic_transfer",
+      "variant": "non_atomic",
+      "scenario": "checkpoint-restart.yaml",
+      "target": {"invariant_id": "transfers.atomicity", "code": "one_sided_transfer", "logical_id": "transfer-1"}
+    }
+  ],
+  "correct": {
+    "variants": ["correct"],
+    "scenarios": [
+      "control.yaml",
+      "lost-response.yaml",
+      "rejections.yaml",
+      "opposite-concurrent.yaml",
+      "process-restart.yaml"
+    ]
+  }
+}
