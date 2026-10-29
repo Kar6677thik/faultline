@@ -50,8 +50,9 @@ class StrictModel(BaseModel):
 
 class Purchase(StrictModel):
     purchase_id: Identifier
-    account_id: Literal["buyer-a"] = "buyer-a"
-    sku: Literal["sku-a"] = "sku-a"
+    # Membership in the selected fixture is checked by the adapter.
+    account_id: Identifier = "buyer-a"
+    sku: Identifier = "sku-a"
     quantity: Annotated[int, Field(ge=1, le=2147483647)] = 1
 
 

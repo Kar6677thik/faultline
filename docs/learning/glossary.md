@@ -108,7 +108,7 @@
 
 **Receipt:** a separate operational record of a cleanup attempt. It does not replace an experiment report or establish a business verdict.
 
-**Replay / comparison / repetition / reduction:** strict replay reruns a saved plan with identical images, adapter code, engine, and platform, refusing any drift; comparison reruns a saved plan against an explicitly chosen variant and records every difference; repetition reruns current inputs with fresh fixtures; reduction would search for a smaller failing scenario. Replay, comparison, and repetition are implemented; reduction is not yet. See [replay](replay.md).
+**Replay / comparison / repetition / reduction:** strict replay reruns a saved plan with identical images, adapter code, engine, and platform, refusing any drift; comparison reruns a saved plan against an explicitly chosen variant and records every difference; repetition reruns current inputs with fresh fixtures; reduction searches for a smaller plan that still reproduces one selected signature. See [replay](replay.md) and [reduction](reduction.md).
 
 **Violation signature:** an adapter's stable fingerprint of one failure: invariant, version, violation code, and logical business identity, without volatile row IDs or times. Reproduction counting targets one signature, not any FAIL.
 
@@ -143,3 +143,5 @@
 **Workload:** the operations sent to the application. Currently it is one logical purchase with explicitly allowed retries.
 
 **WSL2:** Windows Subsystem for Linux version 2. It provides the Linux execution environment used for this project's Docker experiments on Windows.
+
+**Delta debugging (ddmin):** a search that removes groups of inputs, keeps a removal if the failure persists, and splits into smaller groups when no group can be removed. Faultline's version also removes everything that depends on a deleted unit. See [reduction](reduction.md).

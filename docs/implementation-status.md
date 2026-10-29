@@ -8,12 +8,12 @@ This page describes executable behavior. The numbered files in `specs/` define t
 | --- | --- | --- |
 | M1: one trustworthy failure | Demonstrated | Original unsafe/correct PostgreSQL purchase remains a regression |
 | M2: usable experiment engine | Complete | Materialized plans, concurrency, fault controllers, public adapter integration, lifecycle evidence |
-| M3: replay, reduction, investigation | In progress | Strict replay, comparison, and repeat groups implemented; reduction, read-only API and React pending |
+| M3: replay, reduction, investigation | In progress | Strict replay, comparison, repeat groups, and dependency-aware reduction implemented; read-only API and React pending |
 | M4: calibrated release and CI | Pending | Independent correct-B, transfer domain, defect corpus, CI/release packaging and resource measurements |
 
 ## Implemented behavior
 
-- Python CLI: doctor, validate, run, replay, compare, report, and scoped clean. Repetitions create fresh fixtures; they are not deterministic replay.
+- Python CLI: doctor, validate, run, replay, compare, reduce, report, and scoped clean. Repetitions create fresh fixtures; they are not deterministic replay.
 - Strict replay (`replay RUN`, default five trials) rebuilds the saved materialized plan and saved project configuration. It refuses before provisioning unless the plan hash, engine version, adapter package/version/content hash, and complete platform record (OS, architecture, kernel, Docker version, every image ID, project hash, variant) are identical. Comparison (`compare RUN --variant NAME`) runs the same plan against an explicitly chosen variant, records every difference in the group and each manifest, and rejects changed requests, invariant versions, or fixture identity. Neither reproduces OS or transaction scheduling.
 - Repeat, replay, and comparison groups persist after every trial under `<output>/groups/`. They count scheduled, started, completed, interrupted, and unstarted trials; each verdict; and matching versus other failures for a target signature. Reproduction is reported per started and per conclusive trial, with `not_available` for zero denominators. ERROR and interrupted runs never count as reproductions. `report GROUP_ID` shows a group.
 - Strict bounded JSON-compatible YAML, including duplicate/alias/unknown-field rejection. Generic HTTP/JSON requests remain confined to declared internal routes. Adapter validation checks domain-specific inputs and expectations.
@@ -29,9 +29,12 @@ This page describes executable behavior. The numbered files in `specs/` define t
 - Durable plans/manifests/history/snapshots/JSON+Markdown reports and integrity checks. Stage/total budgets reserve cleanup/reporting time; interrupted runs retain partial evidence. Cleanup errors take precedence while retaining available findings.
 - Recovery uses the original output-root lock, recorded immutable IDs, exact ownership labels, and prewritten creation intents. The inventory now supports five containers and four networks. Later cleanup persists recovered bindings separately and does not rewrite experiment artifacts.
 
+- Reduction (`reduce RUN --signature ID`) first requires strict-replay compatibility and a stable baseline: at least 4/5 matching runs with no ERROR. It then runs ddmin over logical operations, faults, and retry suffixes with dependency closure (dependent operations, triggered faults, gated operations, empty barriers). A candidate is kept only after three consecutive matching fresh trials and a strict objective improvement (operations, faults, attempts). A five-run final validation decides `reduction_verified` or `reduction_unverified`. Budgets default to 50 trials or 10 minutes (maximum 500 trials or 60 minutes). Five validation trials are reserved, and artifacts share a 1 GiB group budget. Running out of budget before any improvement is reported as `insufficient_budget`, never `no_smaller_reproduction`. Candidate plans, decisions, trials, and the reduced scenario are persisted under `<output>/groups/<id>/`. Payloads, timings, and fixtures are never shrunk.
+- The adapter contract accepts an optional `fixtures` map. The bundled adapter adds `reduction_market` (19 extra buyers and `sku-noise`), and the verifier reconciles every fixture account and product independently.
+
 ## Supported boundaries and limitations
 
-The bundled order fixture still has one account, one SKU, finite funds, and no broker/background worker. The counter example demonstrates domain onboarding; it is not M4's transfer application or independent correct-B implementation. Only adapter-advertised capabilities are accepted. A generator does not make an infeasible positive workload feasible.
+The bundled order fixtures are `standard_wallet` (one account, one SKU) and `reduction_market` (20 accounts, two SKUs); both have finite funds and no broker or background worker. The counter example demonstrates domain onboarding; it is not M4's transfer application or independent correct-B implementation. Only adapter-advertised capabilities are accepted. A generator does not make an infeasible positive workload feasible.
 
 The project model intentionally supports the five-role HTTP/PostgreSQL topology, not arbitrary service graphs. Images are trusted and must satisfy the documented UID, filesystem, dependency, and worker/proxy protocol contracts; a different tag is not proof of compatibility. Writable tmpfs paths are restricted to `/data` and `/cache`; host paths are never mounted. Resources remain bounded to 64-256 MiB, 100-1000 CPU millis, and 16-64 PIDs per service. The pinned PostgreSQL template uses UID/GID 70 for its disposable storage.
 
@@ -44,6 +47,8 @@ Third-party code is trusted, not sandboxed. Provenance records actual selected p
 See [the experiment-engine walkthrough](learning/experiment-engine.md), [external adapter tutorial](learning/external-adapters.md), and [decision log](learning/decisions.md) for source/test maps and design tradeoffs.
 
 ## Verification status
+
+M3 Phase B validation on 2026-10-29: after a runtime rebuild, the replay and reduction cases **passed together in 901.28 seconds**. The real reduction of a 20-operation duplicate-debit plan reached **1 operation (95% fewer)** and kept the fault and the retry. It was `reduction_verified`, with 5/5 baseline and 5/5 final validation, in 41 trials and 747.6 seconds. That exceeds the 10-minute default budget, which the test raised explicitly. Two candidate trials were INCONCLUSIVE because the application exceeded the 10-second drain budget; they were correctly not counted. See [M3 acceptance results](m3-acceptance-results.md).
 
 M3 Phase A validation on 2026-10-29: **315 unit tests passed**, with 40 Docker tests skipped; lint and format passed. After a runtime rebuild, the real replay/comparison case **passed in 120.61 seconds**. It produced 3/3 matching duplicate-debit replays with byte-identical plans and image IDs, and a 2/2 PASS comparison against the corrected variant whose only recorded differences were `variant` and `platform.variant`. See [M3 acceptance results](m3-acceptance-results.md). The full 40-case Docker regression was not rerun for this phase.
 
@@ -68,4 +73,4 @@ The original rejected trial, corrections, environment, and evidence locations ar
 
 ## Next boundary
 
-Two milestones remain. M3 has strict replay, comparison, and reproduction groups; dependency-aware reduction, the read-only API, and the React investigation interface remain. M4 covers independent implementations, transfer/defect calibration, CI/release packaging, and measured resource targets. Historical measurements above remain separate from future results.
+Two milestones remain. M3 has strict replay, comparison, reproduction groups, and dependency-aware reduction; the read-only API and the React investigation interface remain. M4 covers independent implementations, transfer/defect calibration, CI/release packaging, and measured resource targets. Historical measurements above remain separate from future results.

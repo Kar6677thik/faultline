@@ -94,7 +94,8 @@ def main():
     elif command == "prepare":
         from faultline.orders import prepare
 
-        result = prepare(sys.argv[2])
+        selection = json.loads(sys.argv[2])
+        result = prepare(selection["variant"], selection["fixture"])
     elif command == "snapshot":
         from faultline.orders import snapshot
 

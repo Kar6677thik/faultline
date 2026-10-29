@@ -16,9 +16,17 @@ from faultline.engine import run_one
 from faultline.environment import client_and_preflight
 from faultline.groups import Group, failure_signatures, summarize
 from faultline.locking import ActiveRunError, execution_lock
-from faultline.models import EXIT_CODES, digest, load_scenario
+from faultline.models import EXIT_CODES, Scenario, digest, load_scenario
 from faultline.projects import load_project
 from faultline.recovery import recover, recovery_manifests
+from faultline.reduction import (
+    DEFAULT_MAX_DURATION_MS,
+    DEFAULT_MAX_RUNS,
+    MAX_DURATION_MS,
+    MAX_RUNS,
+    Reducer,
+)
+from faultline.reduction import EXIT as REDUCTION_EXIT
 from faultline.replay import (
     ReplayRejected,
     check_platform,
@@ -192,6 +200,19 @@ def run(
     )
 
 
+def install_interrupts() -> dict:
+    """SIGTERM follows the same cleanup path as Ctrl+C; a repeated signal is ignored."""
+    requested = False
+
+    def interrupt(_signum, _frame):
+        nonlocal requested
+        if not requested:
+            requested = True
+            raise KeyboardInterrupt
+
+    return {sig: signal.signal(sig, interrupt) for sig in (signal.SIGINT, signal.SIGTERM)}
+
+
 def execute_series(
     ctx, command, scenario, variant, project, client, info, repeat, group, *, lineage, extra=None
 ):
@@ -199,16 +220,7 @@ def execute_series(
     paths, reports = [], []
     if group is not None:
         lineage = {**lineage, "group_id": group.id}
-    # SIGTERM follows the same cleanup path as Ctrl+C.
-    interrupt_requested = False
-
-    def interrupt(_signum, _frame):
-        nonlocal interrupt_requested
-        if not interrupt_requested:
-            interrupt_requested = True
-            raise KeyboardInterrupt
-
-    previous = {sig: signal.signal(sig, interrupt) for sig in (signal.SIGINT, signal.SIGTERM)}
+    previous = install_interrupts()
     status = "completed"
     try:
         for index in range(repeat):
@@ -390,6 +402,125 @@ def compare(
             "comparison": {"differences": found},
         },
         extra={"source_run_id": source.run_id, "differences": found},
+    )
+
+
+@app.command()
+def reduce(
+    ctx: typer.Context,
+    bundle: str,
+    signature: Annotated[str | None, typer.Option(help="target violation signature")] = None,
+    max_runs: Annotated[
+        int, typer.Option(min=1, max=MAX_RUNS, help="trial budget, including baseline")
+    ] = DEFAULT_MAX_RUNS,
+    max_duration_ms: Annotated[
+        int, typer.Option(min=1, max=MAX_DURATION_MS, help="wall budget including cleanup")
+    ] = DEFAULT_MAX_DURATION_MS,
+):
+    """Search for a smaller plan that still reproduces one selected violation."""
+    try:
+        source = load_source(resolve_bundle(bundle, ctx.obj["output"]))
+        catalog = failure_signatures(source.report)
+        if signature is None and len(catalog) > 1:
+            # CI must never be prompted; print every choice and refuse.
+            finish(
+                ctx,
+                "reduce",
+                2,
+                {"choices": catalog},
+                diagnostics=[
+                    {
+                        "code": "signature_required",
+                        "message": "Several violation signatures exist; pass --signature",
+                    }
+                ],
+            )
+        target, _notes = select_signature(source.report, signature)
+        if target is None:
+            raise ValueError("source run has no violation signature to reduce")
+        original = replay_scenario(source)
+        client, info = client_and_preflight(project=source.project, variant=source.variant)
+        try:
+            check_platform(source, info)
+        except BaseException:
+            client.close()
+            raise
+    except typer.Exit:
+        raise
+    except ReplayRejected as exc:
+        rejected(ctx, "reduce", "reduction_environment_incompatible", exc)
+    except Exception as exc:
+        input_error(ctx, "reduce", exc)
+
+    def validate(raw):
+        candidate = Scenario.from_plan({**source.plan, "scenario": raw}, source.project)
+        resolve_adapter(source.project, candidate, source.variant)
+        return candidate
+
+    def trial(scenario, purpose):
+        typer.echo(f"reduce {reducer.runs_used}/{max_runs}: {purpose}", err=True)
+        return run_one(
+            scenario,
+            source.variant,
+            ctx.obj["output"],
+            client=client,
+            platform_info=info,
+            project=source.project,
+            lineage={
+                "origin": "reduction",
+                "source_run_id": source.run_id,
+                "source_plan_hash": source.manifest["plan_hash"],
+                "group_id": reducer.id,
+                "trial_purpose": purpose,
+            },
+        )
+
+    previous = install_interrupts()
+    try:
+        reducer = Reducer(
+            ctx.obj["output"],
+            source,
+            target,
+            validate=validate,
+            trial=trial,
+            max_runs=max_runs,
+            max_duration_ms=max_duration_ms,
+            artifact_bytes=original.limits.artifact_bytes,
+            environment=info,
+        )
+        record = reducer.run()
+    except KeyboardInterrupt as exc:
+        input_error(ctx, "reduce", exc, 130)
+    except Exception as exc:
+        input_error(ctx, "reduce", exc, 4)
+    finally:
+        for sig, handler in previous.items():
+            signal.signal(sig, handler)
+        client.close()
+    summary = {
+        key: record[key]
+        for key in (
+            "outcome",
+            "termination_reason",
+            "target_signature",
+            "target",
+            "original_objective",
+            "best",
+            "budget",
+        )
+    }
+    summary["verdict"] = record["outcome"]
+    summary["candidates_tried"] = len(record["candidates"])
+    for name in ("baseline", "validation"):
+        if record[name]:
+            summary[name] = {k: v for k, v in record[name].items() if k != "trials"}
+    finish(
+        ctx,
+        "reduce",
+        REDUCTION_EXIT[record["outcome"]],
+        summary,
+        run_ids=record["run_ids"],
+        group_id=record["group_id"],
     )
 
 

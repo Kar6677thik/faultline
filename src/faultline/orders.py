@@ -46,9 +46,20 @@ CREATE TABLE inflight (
     registration_id text PRIMARY KEY, process_epoch text NOT NULL,
     backend_pid integer NOT NULL, backend_start timestamptz NOT NULL
 );
-INSERT INTO accounts VALUES ('buyer-a', 1000000);
-INSERT INTO products VALUES ('sku-a', 200000, 10);
+CREATE TABLE fixture_identity (name text PRIMARY KEY);
 """
+# Application-side seed data. The verifier keeps its own independent expectation.
+SEEDS = {
+    "standard_wallet": {
+        "accounts": [("buyer-a", 1000000)],
+        "products": [("sku-a", 200000, 10)],
+    },
+    "reduction_market": {
+        "accounts": [("buyer-a", 1000000)]
+        + [(f"buyer-{index:02d}", 1000000) for index in range(1, 20)],
+        "products": [("sku-a", 200000, 10), ("sku-noise", 10000, 100)],
+    },
+}
 
 
 def connect(role: str = "app", *, autocommit: bool = False):
@@ -66,11 +77,16 @@ def connect(role: str = "app", *, autocommit: bool = False):
     )
 
 
-def prepare(variant: str) -> dict:
-    if variant not in {"unsafe", "correct"}:
-        raise ValueError("unsupported variant")
+def prepare(variant: str, fixture: str = "standard_wallet") -> dict:
+    if variant not in {"unsafe", "correct"} or fixture not in SEEDS:
+        raise ValueError("unsupported variant or fixture")
     with connect("setup") as conn:
         conn.execute(SCHEMA)
+        conn.execute("INSERT INTO fixture_identity VALUES (%s)", (fixture,))
+        for account in SEEDS[fixture]["accounts"]:
+            conn.execute("INSERT INTO accounts VALUES (%s, %s)", account)
+        for product in SEEDS[fixture]["products"]:
+            conn.execute("INSERT INTO products VALUES (%s, %s, %s)", product)
         if variant == "correct":
             conn.execute("CREATE UNIQUE INDEX purchase_identity ON orders(account_id, purchase_id)")
             conn.execute("CREATE UNIQUE INDEX retry_identity ON idempotency(account_id, key)")
@@ -84,6 +100,8 @@ def prepare(variant: str) -> dict:
         conn.execute("GRANT USAGE ON SCHEMA public TO fl_app, fl_observer")
         conn.execute("GRANT SELECT, INSERT, UPDATE ON ALL TABLES IN SCHEMA public TO fl_app")
         conn.execute("GRANT DELETE ON inflight TO fl_app")
+        # The application has no reason to read or change which fixture was seeded.
+        conn.execute("REVOKE ALL ON fixture_identity FROM fl_app")
         conn.execute("GRANT SELECT ON ALL TABLES IN SCHEMA public TO fl_observer")
         conn.execute("GRANT pg_read_all_stats TO fl_observer")
         conn.execute("ALTER ROLE fl_observer SET default_transaction_read_only = on")
@@ -101,6 +119,7 @@ def snapshot(role: str) -> dict:
             for table in TABLES
         }
         transaction = conn.execute("SELECT pg_current_snapshot()::text AS id").fetchone()["id"]
+        fixture = conn.execute("SELECT name FROM fixture_identity").fetchall()
         sessions = conn.execute(
             "SELECT count(*) AS count FROM pg_stat_activity WHERE usename = 'fl_app'"
         ).fetchone()["count"]
@@ -109,7 +128,8 @@ def snapshot(role: str) -> dict:
         "snapshot_id": role,
         "role": role,
         "adapter_profile": "orders_v1",
-        "fixture": "standard_wallet",
+        # A missing or ambiguous identity is reported, never assumed.
+        "fixture": fixture[0]["name"] if len(fixture) == 1 else "unidentified",
         "authority": "postgresql",
         "isolation": "repeatable_read_read_only",
         "started_ns": started,

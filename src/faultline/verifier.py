@@ -54,6 +54,37 @@ class EvidenceError(ValueError):
     pass
 
 
+# Opening state written independently of the application's seeding code. Rows are listed
+# in primary-key order, matching the observer's canonical snapshot ordering.
+def _market_accounts():
+    buyers = [{"account_id": f"buyer-{i:02d}", "balance_minor": 1000000} for i in range(1, 20)]
+    return [*buyers, {"account_id": "buyer-a", "balance_minor": 1000000}]
+
+
+FIXTURES = {
+    "standard_wallet": {
+        "accounts": [{"account_id": "buyer-a", "balance_minor": 1000000}],
+        "products": [{"sku": "sku-a", "price_minor": 200000, "stock": 10}],
+    },
+    # Spec 10: standard_wallet plus 19 independent buyers and a cheap noise product.
+    "reduction_market": {
+        "accounts": _market_accounts(),
+        "products": [
+            {"sku": "sku-a", "price_minor": 200000, "stock": 10},
+            {"sku": "sku-noise", "price_minor": 10000, "stock": 100},
+        ],
+    },
+}
+
+
+def fixture_records(name: str) -> dict:
+    """Complete expected baseline records for a registered fixture."""
+    if name not in FIXTURES:
+        raise EvidenceError("unregistered fixture")
+    opening = FIXTURES[name]
+    return {table: [dict(row) for row in opening.get(table, [])] for table in FIELDS}
+
+
 def validate_snapshot(snapshot: dict) -> None:
     if snapshot.get("snapshot_schema_version") != 1:
         raise EvidenceError("unsupported snapshot schema")
@@ -87,9 +118,10 @@ def validate_baseline(snapshot: dict) -> None:
     records = snapshot["records"]
     if not snapshot["complete"] or not snapshot["quiescent"]:
         raise EvidenceError("baseline is not complete and quiescent")
-    if records["accounts"] != [{"account_id": "buyer-a", "balance_minor": 1000000}]:
+    expected = fixture_records(snapshot.get("fixture"))
+    if records["accounts"] != expected["accounts"]:
         raise EvidenceError("incorrect opening wallet")
-    if records["products"] != [{"sku": "sku-a", "price_minor": 200000, "stock": 10}]:
+    if records["products"] != expected["products"]:
         raise EvidenceError("incorrect opening inventory")
     if any(records[name] for name in FIELDS if name not in {"accounts", "products"}):
         raise EvidenceError("fixture has preexisting business effects")
@@ -188,7 +220,10 @@ def _verify_purchase(operations, baseline, final, attempts, workload_complete):
         [row for row in state[k] if row["purchase_id"] == logical_id]
         for k in ("orders", "ledger", "movements", "outbox")
     )
-    amount = baseline["records"]["products"][0]["price_minor"] * intent["quantity"]
+    prices = {row["sku"]: row["price_minor"] for row in baseline["records"]["products"]}
+    if intent["sku"] not in prices:
+        raise EvidenceError("operation references a product outside the fixture")
+    amount = prices[intent["sku"]] * intent["quantity"]
     failures = {name: [] for name in INVARIANTS}
 
     def fail(invariant, code, expected, observed, tables):
@@ -257,15 +292,26 @@ def _verify_purchase(operations, baseline, final, attempts, workload_complete):
             ["orders", "ledger", "movements"],
         )
 
-    expected_balance = 1000000 - sum(
-        row["amount_minor"] * (1 if row["direction"] == "debit" else -1) for row in state["ledger"]
-    )
+    # Whole-snapshot reconciliation: every fixture account and product, every record.
+    expected_accounts = [
+        {
+            "account_id": account["account_id"],
+            "balance_minor": account["balance_minor"]
+            - sum(
+                row["amount_minor"] * (1 if row["direction"] == "debit" else -1)
+                for row in state["ledger"]
+                if row["account_id"] == account["account_id"]
+            ),
+        }
+        for account in baseline["records"]["accounts"]
+    ]
+    known_accounts = {row["account_id"] for row in expected_accounts}
     balances = state["accounts"]
     if (
-        balances != [{"account_id": "buyer-a", "balance_minor": expected_balance}]
-        or expected_balance < 0
+        balances != expected_accounts
+        or any(row["balance_minor"] < 0 for row in expected_accounts)
         or any(
-            r["account_id"] != "buyer-a"
+            r["account_id"] not in known_accounts
             or r["direction"] not in {"debit", "credit"}
             or r["amount_minor"] <= 0
             or r["currency"] != "INR"
@@ -275,21 +321,30 @@ def _verify_purchase(operations, baseline, final, attempts, workload_complete):
         fail(
             "wallet_conservation",
             "balance_mismatch",
-            expected_balance,
+            expected_accounts,
             balances,
             ["accounts", "ledger"],
         )
 
-    expected_stock = 10 + sum(row["quantity_delta"] for row in state["movements"])
+    expected_products = [
+        {
+            **product,
+            "stock": product["stock"]
+            + sum(
+                row["quantity_delta"] for row in state["movements"] if row["sku"] == product["sku"]
+            ),
+        }
+        for product in baseline["records"]["products"]
+    ]
     if (
-        state["products"] != [{"sku": "sku-a", "price_minor": 200000, "stock": expected_stock}]
-        or expected_stock < 0
-        or any(row["sku"] != "sku-a" for row in state["movements"])
+        state["products"] != expected_products
+        or any(row["stock"] < 0 for row in expected_products)
+        or any(row["sku"] not in prices for row in state["movements"])
     ):
         fail(
             "inventory_conservation",
             "stock_mismatch",
-            expected_stock,
+            expected_products,
             state["products"],
             ["products", "movements"],
         )

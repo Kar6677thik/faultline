@@ -1,0 +1,311 @@
+# AT-016 fixture: one lost-response duplicate debit hidden among 19 unrelated valid purchases.
+schema_version: 1
+id: reduction_market_lost_response
+adapter_profile: orders_v1
+fixture: reduction_market
+seed: 42
+concurrency: 4
+operations:
+  - id: purchase_a
+    kind: create_order
+    logical_id: purchase-a
+    route: orders_api
+    request:
+      method: POST
+      path: /orders
+      headers:
+        Idempotency-Key: purchase-a-key
+      json:
+        purchase_id: purchase-a
+        account_id: buyer-a
+        sku: sku-a
+        quantity: 1
+    retry:
+      max_attempts: 2
+      on: [timeout, connection_error]
+      backoff_ms: [100]
+    timeout_ms: 1000
+  - id: noise_01
+    kind: create_order
+    logical_id: noise-01
+    route: orders_api
+    request:
+      method: POST
+      path: /orders
+      headers:
+        Idempotency-Key: noise-01-key
+      json:
+        purchase_id: noise-01
+        account_id: buyer-01
+        sku: sku-noise
+        quantity: 1
+  - id: noise_02
+    kind: create_order
+    logical_id: noise-02
+    route: orders_api
+    request:
+      method: POST
+      path: /orders
+      headers:
+        Idempotency-Key: noise-02-key
+      json:
+        purchase_id: noise-02
+        account_id: buyer-02
+        sku: sku-noise
+        quantity: 1
+  - id: noise_03
+    kind: create_order
+    logical_id: noise-03
+    route: orders_api
+    request:
+      method: POST
+      path: /orders
+      headers:
+        Idempotency-Key: noise-03-key
+      json:
+        purchase_id: noise-03
+        account_id: buyer-03
+        sku: sku-noise
+        quantity: 1
+  - id: noise_04
+    kind: create_order
+    logical_id: noise-04
+    route: orders_api
+    request:
+      method: POST
+      path: /orders
+      headers:
+        Idempotency-Key: noise-04-key
+      json:
+        purchase_id: noise-04
+        account_id: buyer-04
+        sku: sku-noise
+        quantity: 1
+  - id: noise_05
+    kind: create_order
+    logical_id: noise-05
+    route: orders_api
+    request:
+      method: POST
+      path: /orders
+      headers:
+        Idempotency-Key: noise-05-key
+      json:
+        purchase_id: noise-05
+        account_id: buyer-05
+        sku: sku-noise
+        quantity: 1
+  - id: noise_06
+    kind: create_order
+    logical_id: noise-06
+    route: orders_api
+    request:
+      method: POST
+      path: /orders
+      headers:
+        Idempotency-Key: noise-06-key
+      json:
+        purchase_id: noise-06
+        account_id: buyer-06
+        sku: sku-noise
+        quantity: 1
+  - id: noise_07
+    kind: create_order
+    logical_id: noise-07
+    route: orders_api
+    request:
+      method: POST
+      path: /orders
+      headers:
+        Idempotency-Key: noise-07-key
+      json:
+        purchase_id: noise-07
+        account_id: buyer-07
+        sku: sku-noise
+        quantity: 1
+  - id: noise_08
+    kind: create_order
+    logical_id: noise-08
+    route: orders_api
+    request:
+      method: POST
+      path: /orders
+      headers:
+        Idempotency-Key: noise-08-key
+      json:
+        purchase_id: noise-08
+        account_id: buyer-08
+        sku: sku-noise
+        quantity: 1
+  - id: noise_09
+    kind: create_order
+    logical_id: noise-09
+    route: orders_api
+    request:
+      method: POST
+      path: /orders
+      headers:
+        Idempotency-Key: noise-09-key
+      json:
+        purchase_id: noise-09
+        account_id: buyer-09
+        sku: sku-noise
+        quantity: 1
+  - id: noise_10
+    kind: create_order
+    logical_id: noise-10
+    route: orders_api
+    request:
+      method: POST
+      path: /orders
+      headers:
+        Idempotency-Key: noise-10-key
+      json:
+        purchase_id: noise-10
+        account_id: buyer-10
+        sku: sku-noise
+        quantity: 1
+  - id: noise_11
+    kind: create_order
+    logical_id: noise-11
+    route: orders_api
+    request:
+      method: POST
+      path: /orders
+      headers:
+        Idempotency-Key: noise-11-key
+      json:
+        purchase_id: noise-11
+        account_id: buyer-11
+        sku: sku-noise
+        quantity: 1
+  - id: noise_12
+    kind: create_order
+    logical_id: noise-12
+    route: orders_api
+    request:
+      method: POST
+      path: /orders
+      headers:
+        Idempotency-Key: noise-12-key
+      json:
+        purchase_id: noise-12
+        account_id: buyer-12
+        sku: sku-noise
+        quantity: 1
+  - id: noise_13
+    kind: create_order
+    logical_id: noise-13
+    route: orders_api
+    request:
+      method: POST
+      path: /orders
+      headers:
+        Idempotency-Key: noise-13-key
+      json:
+        purchase_id: noise-13
+        account_id: buyer-13
+        sku: sku-noise
+        quantity: 1
+  - id: noise_14
+    kind: create_order
+    logical_id: noise-14
+    route: orders_api
+    request:
+      method: POST
+      path: /orders
+      headers:
+        Idempotency-Key: noise-14-key
+      json:
+        purchase_id: noise-14
+        account_id: buyer-14
+        sku: sku-noise
+        quantity: 1
+  - id: noise_15
+    kind: create_order
+    logical_id: noise-15
+    route: orders_api
+    request:
+      method: POST
+      path: /orders
+      headers:
+        Idempotency-Key: noise-15-key
+      json:
+        purchase_id: noise-15
+        account_id: buyer-15
+        sku: sku-noise
+        quantity: 1
+  - id: noise_16
+    kind: create_order
+    logical_id: noise-16
+    route: orders_api
+    request:
+      method: POST
+      path: /orders
+      headers:
+        Idempotency-Key: noise-16-key
+      json:
+        purchase_id: noise-16
+        account_id: buyer-16
+        sku: sku-noise
+        quantity: 1
+  - id: noise_17
+    kind: create_order
+    logical_id: noise-17
+    route: orders_api
+    request:
+      method: POST
+      path: /orders
+      headers:
+        Idempotency-Key: noise-17-key
+      json:
+        purchase_id: noise-17
+        account_id: buyer-17
+        sku: sku-noise
+        quantity: 1
+  - id: noise_18
+    kind: create_order
+    logical_id: noise-18
+    route: orders_api
+    request:
+      method: POST
+      path: /orders
+      headers:
+        Idempotency-Key: noise-18-key
+      json:
+        purchase_id: noise-18
+        account_id: buyer-18
+        sku: sku-noise
+        quantity: 1
+  - id: noise_19
+    kind: create_order
+    logical_id: noise-19
+    route: orders_api
+    request:
+      method: POST
+      path: /orders
+      headers:
+        Idempotency-Key: noise-19-key
+      json:
+        purchase_id: noise-19
+        account_id: buyer-19
+        sku: sku-noise
+        quantity: 1
+faults:
+  - id: hide_first_response
+    kind: response_suppress
+    target: orders_api
+    trigger:
+      event: upstream_response_complete
+      operation_id: purchase_a
+      attempt: 1
+      status: 201
+    required: true
+invariants:
+  - orders.at_most_one_debit
+  - orders.purchase_atomicity
+  - orders.wallet_conservation
+  - orders.inventory_conservation
+  - orders.confirmation_intent
+  - orders.idempotency_contract
+  - orders.completed_purchase

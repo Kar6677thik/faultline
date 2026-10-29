@@ -38,6 +38,11 @@ class AdapterError(RuntimeError):
         }
 
 
+class FixtureIdentity(StrictModel):
+    version: PositiveVersion
+    hash: Hash
+
+
 class Description(StrictModel):
     boundary_version: PositiveVersion
     adapter_id: Identifier
@@ -54,6 +59,9 @@ class Description(StrictModel):
     quiescence: Literal["graceful_process_exit_and_database_sessions"]
     external_registration: bool
     generators: dict[str, PositiveVersion] = Field(default_factory=dict)
+    # Optional selectable fixtures besides the default `fixture`. Adapters that declare
+    # any receive the selected name as `prepare(..., fixture=name)`.
+    fixtures: dict[Identifier, FixtureIdentity] = Field(default_factory=dict)
     readiness_checks: list[Identifier] = Field(
         default_factory=lambda: [
             "orders_health",
@@ -166,16 +174,13 @@ class OrdersAdapter:
             "profile": "orders_v1",
             "fixture": "standard_wallet",
             "fixture_version": 1,
-            "fixture_hash": digest(
-                {
-                    "accounts": [{"account_id": "buyer-a", "balance_minor": 1000000}],
-                    "products": [{"sku": "sku-a", "price_minor": 200000, "stock": 10}],
-                    **{
-                        name: []
-                        for name in ("orders", "ledger", "movements", "outbox", "idempotency")
-                    },
+            "fixture_hash": digest(verifier.fixture_records("standard_wallet")),
+            "fixtures": {
+                "reduction_market": {
+                    "version": 1,
+                    "hash": digest(verifier.fixture_records("reduction_market")),
                 }
-            ),
+            },
             "operations": ["create_order"],
             "faults": ["response_suppress", "proxy_latency", "proxy_disconnect", "process_restart"],
             "invariants": dict.fromkeys(INVARIANTS, 1),
@@ -190,6 +195,9 @@ class OrdersAdapter:
     def validate(self, scenario):
         # Recheck even direct Python callers that used model_copy without validation.
         Scenario.model_validate(scenario.model_dump(by_alias=True))
+        opening = verifier.fixture_records(scenario.fixture)
+        accounts = {row["account_id"] for row in opening["accounts"]}
+        products = {row["sku"] for row in opening["products"]}
         identities = {}
         for operation in scenario.all_operations:
             request = operation.request
@@ -213,6 +221,11 @@ class OrdersAdapter:
                 Purchase.model_validate({**body, "quantity": 1})
             else:
                 Purchase.model_validate(body)
+            if (
+                body.get("account_id", "buyer-a") not in accounts
+                or body.get("sku", "sku-a") not in products
+            ):
+                raise ValueError("purchase references an account or product outside the fixture")
             if operation.logical_id != body["purchase_id"]:
                 raise ValueError("logical_id must equal purchase_id")
             if operation.expectation == "success":
@@ -229,8 +242,9 @@ class OrdersAdapter:
             ):
                 raise ValueError("order operations require POST /orders and an Idempotency-Key")
 
-    def prepare(self, environment, variant):
-        result = environment.call("observer", "prepare", variant, timeout=10)
+    def prepare(self, environment, variant, fixture="standard_wallet"):
+        argument = json.dumps({"variant": variant, "fixture": fixture})
+        result = environment.call("observer", "prepare", argument, timeout=10)
         if (
             type(result) is not dict
             or set(result) != {"prepared"}
@@ -271,6 +285,11 @@ class CheckedAdapter:
         self.description = self._call(
             "describe", lambda value: Description.model_validate(detached_json(value))
         )
+        if self.description.fixture in self.description.fixtures:
+            raise AdapterError("describe", "adapter_contract_error", "Duplicate fixture name")
+        d = self.description
+        # Selected by validate(); until then only the default fixture is meaningful.
+        self.fixture = (d.fixture, d.fixture_version, d.fixture_hash)
         if self.description.boundary_version != 1:
             raise AdapterError("describe", "adapter_contract_error", "Unsupported adapter boundary")
         for hook in ("validate", "prepare", "readiness", "quiesce", "snapshot", "verify"):
@@ -327,9 +346,15 @@ class CheckedAdapter:
                 generated.extend(operations)
                 identities.append({**generator.model_dump(), "version": version, "prng": algorithm})
             scenario.materialize_generators(generated, identities)
+        if scenario.fixture == descriptor.fixture:
+            selected = (descriptor.fixture, descriptor.fixture_version, descriptor.fixture_hash)
+        elif scenario.fixture in descriptor.fixtures:
+            identity = descriptor.fixtures[scenario.fixture]
+            selected = (scenario.fixture, identity.version, identity.hash)
+        else:
+            raise ValueError("Scenario requires an unregistered fixture")
         if (
             scenario.adapter_profile != descriptor.profile
-            or scenario.fixture != descriptor.fixture
             or scenario.concurrency > descriptor.concurrency
             or any(op.kind not in descriptor.operations for op in scenario.all_operations)
             or any(f.kind not in descriptor.faults for f in scenario.faults)
@@ -339,14 +364,15 @@ class CheckedAdapter:
         ):
             raise ValueError("Scenario or variant requires unsupported adapter capabilities")
         self._call("validate", self._nothing, scenario)
+        self.fixture = selected
         scenario.bind_adapter_plan(
             {
                 "adapter_id": descriptor.adapter_id,
                 "boundary_version": descriptor.boundary_version,
                 "profile": descriptor.profile,
-                "fixture": descriptor.fixture,
-                "fixture_version": descriptor.fixture_version,
-                "fixture_hash": descriptor.fixture_hash,
+                "fixture": selected[0],
+                "fixture_version": selected[1],
+                "fixture_hash": selected[2],
                 "invariants": descriptor.invariants,
                 "generators": descriptor.generators,
             }
@@ -358,8 +384,15 @@ class CheckedAdapter:
             raise ValueError("hook must return None on success")
 
     def prepare(self, environment, variant):
+        name = self.fixture[0]
+        # The default fixture keeps the original two-argument hook for existing adapters.
+        extra = {} if name == self.description.fixture else {"fixture": name}
         return self._call(
-            "prepare", lambda value: self._snapshot(value, "baseline"), environment, variant
+            "prepare",
+            lambda value: self._snapshot(value, "baseline"),
+            environment,
+            variant,
+            **extra,
         )
 
     def readiness(self, environment):
@@ -387,11 +420,11 @@ class CheckedAdapter:
             raise ValueError("snapshot row counts do not match records")
         if role == "baseline" and (not snapshot.complete or not snapshot.quiescent):
             raise ValueError("baseline must be complete and quiescent")
-        if role == "baseline" and snapshot.content_hash != self.description.fixture_hash:
+        if role == "baseline" and snapshot.content_hash != self.fixture[2]:
             raise ValueError("baseline differs from the planned fixture digest")
         if snapshot.adapter_profile != self.description.profile:
             raise ValueError("snapshot profile mismatch")
-        if snapshot.fixture != self.description.fixture:
+        if snapshot.fixture != self.fixture[0]:
             raise ValueError("snapshot fixture mismatch")
         if snapshot.quiescent != (snapshot.application_sessions == 0):
             raise ValueError("snapshot quiescence contradicts database session evidence")

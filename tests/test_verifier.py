@@ -1,9 +1,9 @@
 from copy import deepcopy
 
 import pytest
-from conftest import envelope
+from conftest import ROOT, envelope
 
-from faultline.models import verdict
+from faultline.models import digest, load_document, verdict
 from faultline.verifier import EvidenceError, validate_baseline, verify
 
 
@@ -144,3 +144,124 @@ def test_corrupt_hash_and_bad_fixture_are_errors(scenario, baseline, correct_sna
 )
 def test_verdict_precedence(findings, diagnostics, coverage, expected):
     assert verdict(findings, diagnostics, coverage) == expected
+
+
+def market_snapshot(duplicate=False, steal_from=None):
+    """Hand-built reduction_market state: purchase-a plus one unrelated noise purchase."""
+    from faultline.verifier import fixture_records
+
+    records = fixture_records("reduction_market")
+    purchases = [
+        ("purchase-a", "buyer-a", "sku-a", 200000),
+        ("noise-01", "buyer-01", "sku-noise", 10000),
+    ]
+    debits = {"buyer-a": 0, "buyer-01": 0}
+    sold = {"sku-a": 0, "sku-noise": 0}
+    for index, (purchase, account, sku, amount) in enumerate(purchases):
+        copies = 2 if duplicate and purchase == "purchase-a" else 1
+        for copy in range(copies):
+            order_id = f"order-{index}-{copy}"
+            order = {
+                "order_id": order_id,
+                "purchase_id": purchase,
+                "account_id": account,
+                "sku": sku,
+                "quantity": 1,
+                "amount_minor": amount,
+                "currency": "INR",
+                "status": "confirmed",
+            }
+            records["orders"].append(order)
+            charged = steal_from if steal_from and purchase == "noise-01" else account
+            records["ledger"].append(
+                {
+                    "entry_id": f"debit-{index}-{copy}",
+                    "account_id": charged,
+                    "purchase_id": purchase,
+                    "order_id": order_id,
+                    "direction": "debit",
+                    "amount_minor": amount,
+                    "currency": "INR",
+                }
+            )
+            records["movements"].append(
+                {
+                    "movement_id": f"move-{index}-{copy}",
+                    "sku": sku,
+                    "purchase_id": purchase,
+                    "order_id": order_id,
+                    "quantity_delta": -1,
+                }
+            )
+            records["outbox"].append(
+                {
+                    "event_id": f"event-{index}-{copy}",
+                    "purchase_id": purchase,
+                    "order_id": order_id,
+                    "event_type": "order_confirmed",
+                    "payload": dict(order),
+                }
+            )
+            debits[account] += amount
+            sold[sku] += 1
+        records["idempotency"].append(
+            {
+                "record_id": f"key-{index}",
+                "account_id": account,
+                "key": f"{purchase}-key",
+                "fingerprint": digest(
+                    {"purchase_id": purchase, "account_id": account, "sku": sku, "quantity": 1}
+                ),
+                "order_id": f"order-{index}-0",
+            }
+        )
+    for row in records["accounts"]:
+        row["balance_minor"] -= debits.get(row["account_id"], 0)
+    for row in records["products"]:
+        row["stock"] -= sold[row["sku"]]
+    return records
+
+
+def market_scenario():
+    from faultline.models import Scenario
+
+    raw = load_document(ROOT / "examples/orders/reduction-market.yaml")
+    raw["operations"] = raw["operations"][:2]
+    raw["faults"] = []
+    raw["operations"][0]["retry"] = {"max_attempts": 1, "on": [], "backoff_ms": []}
+    return Scenario.model_validate(raw)
+
+
+def test_reduction_market_reconciles_independent_accounts_and_products():
+    from faultline.verifier import fixture_records
+
+    baseline = envelope(fixture_records("reduction_market"), "baseline")
+    baseline["fixture"] = "reduction_market"
+    validate_baseline(baseline)
+    final = envelope(market_snapshot())
+    final["fixture"] = "reduction_market"
+    results = verify(market_scenario(), baseline, final, [])
+    assert set(statuses(results).values()) == {"PASS"}
+    assert len(results) == 14  # seven invariants for each of two logical purchases
+
+
+def test_reduction_market_duplicate_and_wrong_account_are_caught():
+    from faultline.verifier import fixture_records
+
+    baseline = envelope(fixture_records("reduction_market"), "baseline")
+    baseline["fixture"] = "reduction_market"
+    duplicate = envelope(market_snapshot(duplicate=True))
+    results = verify(market_scenario(), baseline, duplicate, [])
+    failing = {(r["invariant_id"], r["logical_id"]) for r in results if r["status"] == "FAIL"}
+    assert ("orders.at_most_one_debit", "purchase-a") in failing
+    assert ("orders.at_most_one_debit", "noise-01") not in failing
+    # Charging buyer-02 for buyer-01's noise purchase breaks per-account conservation.
+    stolen = envelope(market_snapshot(steal_from="buyer-02"))
+    results = verify(market_scenario(), baseline, stolen, [])
+    assert "FAIL" == statuses(results)["orders.wallet_conservation"]
+
+
+def test_unregistered_fixture_baseline_is_evidence_error(baseline):
+    baseline["fixture"] = "unknown_fixture"
+    with pytest.raises(EvidenceError, match="unregistered"):
+        validate_baseline(baseline)

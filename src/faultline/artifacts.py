@@ -63,7 +63,7 @@ class Bundle:
             # Replay/comparison provenance; an ordinary run has no source.
             "origin": (lineage or {}).get("origin", "run"),
         }
-        for key in ("source_run_id", "source_plan_hash", "group_id", "comparison"):
+        for key in ("source_run_id", "source_plan_hash", "group_id", "comparison", "trial_purpose"):
             if lineage and key in lineage:
                 self.manifest[key] = lineage[key]
         self.write("plan.json", scenario.plan())

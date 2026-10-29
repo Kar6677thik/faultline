@@ -471,3 +471,27 @@ These are implementation decisions, explained for learning. They complement the 
 **ELI5:** if the thermometer broke during an experiment, you cannot count that reading, even if it happened to show the number you expected.
 
 **Reason:** a harness error means the evidence chain is broken, so counting it would overstate reliability. Two denominators show both "how often did it happen per attempt" and "how often among trustworthy attempts" without hiding either. **Alternatives and tradeoffs:** a single success rate is easier to read but can hide errors; a probability estimate would claim more than a handful of trials supports. Group files are plain JSON and are not themselves hash-inventoried; they reference hash-verified run bundles.
+
+## L-049: Let adapters declare additional selectable fixtures
+
+**Choice:** add an optional `fixtures` map (name → version and hash) to the adapter description. The default `fixture` keeps its existing two-argument `prepare` call; only a declared additional fixture is passed as `prepare(environment, variant, fixture=name)`. The selected identity is bound into the plan, and baselines and snapshots are checked against it. The bundled adapter adds `reduction_market`. The verifier keeps its own expected opening rows and reconciles every fixture account and product separately.
+
+**ELI5:** a teacher can hand out a different worksheet, but must write its name on the answer sheet, and the marker keeps their own answer key.
+
+**Reason:** AT-016 needs real, independent noise purchases that do not share the target buyer's wallet. **Alternatives and tradeoffs:** changing every adapter's `prepare` signature would break external packages; encoding the fixture in the variant would mix application choice with data choice. The application records the seeded fixture in a table it cannot read or modify, so a snapshot can report which data it started from. The seed data and the verifier's expectation are written twice on purpose, so the judge does not trust the application's seeding code.
+
+## L-050: Reduce with dependency-aware delta debugging and three-trial agreement
+
+**Choice:** after a five-run baseline (at least four matching, no ERROR), run ddmin over operations, then faults, then retry suffixes. Removal closure deletes dependent operations, triggered faults, gated operations, and empty barriers. Each candidate is validated like user input, then must reproduce the target signature in three consecutive fresh trials, stopping at the first miss. It must also strictly improve (operations, faults, attempts). A final five-run validation decides between "verified" and "unverified".
+
+**ELI5:** remove ingredients in groups; keep a removal only if the cake collapses the same way three times; then bake the final recipe five more times before telling anyone.
+
+**Reason:** concurrency failures are noisy. A single matching trial would let luck shrink the plan, and a different failure must not stand in for the target. **Alternatives and tradeoffs:** statistical acceptance or global minimization would need many more trials than a laptop can afford. Shrinking payload values could change business meaning. The greedy search may miss smaller plans, so reports say "smaller", never "minimal".
+
+## L-051: Treat budgets as part of the result and never let exhaustion look like a negative finding
+
+**Choice:** count every started trial, including errors and rejections, against a run and wall budget that includes provisioning and cleanup. Reserve five trials (count and slowest-trial time) for final validation before admitting any candidate trial. Share a 1 GiB artifact budget across the group. Report `insufficient_budget` when the budget ends before any improvement, `reduction_unverified` when a better plan could not be validated, and `no_smaller_reproduction` only when the search actually finished.
+
+**ELI5:** if the shop closes before you finish testing, you can't claim nothing in the shop would have worked.
+
+**Reason:** the specification's defaults (50 trials, 10 minutes) are small compared with real Docker trials. Without the distinction, a budget stop would look like proof that the plan is already as small as possible. **Limit:** the time reserve uses the slowest observed trial; an even slower later trial can still exceed the wall budget, which is then recorded as the termination reason.

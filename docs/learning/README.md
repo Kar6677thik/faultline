@@ -64,3 +64,9 @@ Read [replay, comparison, and honest repeat counts](replay.md) to learn why a st
 replay refuses changed images or code, how a comparison records its differences, and
 how repeat groups count reproductions without hiding errors. Decisions L-046 through
 L-048 record the tradeoffs.
+
+Then read [reduction](reduction.md) to see how a 20-operation failure is shrunk by
+deleting whole operations, faults, and retries. You'll see why every kept deletion needs
+three matching fresh runs, and why running out of budget is reported differently from
+finding nothing. Decisions L-049 through L-051 cover the additional fixture, the search
+algorithm, and budgets.
