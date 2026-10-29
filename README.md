@@ -60,6 +60,16 @@ Recovery must use the original output root recorded in the manifest. Copied/move
 
 New runs save creation intents before contacting Docker. If a crash loses the returned resource ID, cleanup can inspect the exact recorded name, verify all ownership and creation-token labels, and durably bind the ID before deletion. Later recovery keeps those IDs in `<output>/cleanup/bindings/`; preserve that directory with the manifests and receipts. An absent unresolved creation remains incomplete because Docker could still finish the request later. See the [ELI5 creation recovery guide](docs/learning/creation-recovery.md).
 
+## Replay and compare a saved run
+
+```bash
+.venv/bin/faultline replay <run-uuid> --repeat 3 --signature <signature>
+.venv/bin/faultline compare <run-uuid> --variant correct --repeat 2
+.venv/bin/faultline report <group-uuid>
+```
+
+Strict replay reruns the saved plan in fresh containers and refuses (exit 2, before provisioning) if the engine, adapter content, plan, platform, or any image ID differs. Comparison runs the same plan against an explicitly chosen variant and records each difference. Groups under `.faultline/groups/` count every trial, report matching failures per started and per conclusive trial, and never count an ERROR or interrupted run as a reproduction. An unsafe duplicate usually has several violation signatures; choose one with `--signature` to get reproduction fractions. See the [replay guide](docs/learning/replay.md).
+
 Run/report exit codes: **0 PASS**, **1 FAIL**, **2 invalid input/preflight**, **3 INCONCLUSIVE**, **4 ERROR**, **130 interrupted**. Missing fault coverage cannot produce PASS. Cleanup failures produce ERROR while retaining available findings. Validation rejects features not implemented in this milestone.
 
 The engine uses a checked order-adapter boundary. `faultline --format json validate examples/orders/control.yaml` shows its supported capabilities without Docker. Incomplete or malformed grading results produce ERROR, even if the returned subset says PASS. Projects can select the built-in adapter or a separately installed trusted Python package through the `faultline.adapters` entry-point group. Exact package versions, unambiguous registrations, bounded file provenance, and a ten-second adapter preflight are checked before Docker. See the [ELI5 adapter guide](docs/learning/adapters.md) and [installation tutorial](docs/learning/installed-adapters.md).
@@ -123,4 +133,4 @@ FAULTLINE_INTEGRATION=1 FAULTLINE_ACCEPTANCE_REPEATS=20 \
 
 Every trial creates and removes its own database, application, proxy, worker, observer, and networks. Tests verify actual ledger totals, fault coverage, report integrity, and absence of owned leftovers. Independent verifier fixtures also test duplicate records, orphan effects, false success responses, lost updates, missing evidence, and a backend that performs no work.
 
-Use only trusted local compatible images and synthetic fixtures. There is no arbitrary endpoint or production target option. Two milestones remain: M3 adds strict replay, reduction, and React investigation; M4 adds independent correct-B/transfer validation, the defect corpus, and CI/release packaging. See the specification and implementation-status document for the remaining gates.
+Use only trusted local compatible images and synthetic fixtures. There is no arbitrary endpoint or production target option. Two milestones remain: M3 has strict replay and comparison, and still adds reduction and React investigation; M4 adds independent correct-B/transfer validation, the defect corpus, and CI/release packaging. See the specification and implementation-status document for the remaining gates.

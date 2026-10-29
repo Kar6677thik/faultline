@@ -465,6 +465,28 @@ class Scenario(StrictModel):
             ),
         }
 
+    @classmethod
+    def from_plan(cls, plan: dict, project=None) -> "Scenario":
+        """Rebuild the saved materialized workload; generators are never re-expanded."""
+        if (
+            plan.get("plan_schema_version") != 1
+            or plan.get("canonicalization_version") != 1
+            or plan.get("fault_semantics_version") != 1
+            or plan.get("implementation_profile") != "experiment_engine_v1"
+        ):
+            raise ValueError("saved plan uses an unsupported plan, fault, or profile version")
+        raw = plan["scenario"]
+        if raw.get("generators"):
+            raise ValueError("saved plan contains unexpanded generators")
+        scenario = project.scenario(raw) if project is not None else cls.model_validate(raw)
+        scenario.keep_generation_identity(plan["generators"])
+        return scenario
+
+    def keep_generation_identity(self, identities):
+        # Saved generator provenance stays in the plan even though its values are now literal.
+        if not self.generators:
+            self._generation_identity = json.loads(canonical_bytes(identities))
+
     def bind_adapter_plan(self, value):
         self._adapter_plan = json.loads(canonical_bytes(value))
 

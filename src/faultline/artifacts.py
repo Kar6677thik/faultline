@@ -27,7 +27,15 @@ def atomic_json(path: Path, data: dict) -> None:
 
 
 class Bundle:
-    def __init__(self, output: Path, scenario, variant: str, project: dict | None = None):
+    def __init__(
+        self,
+        output: Path,
+        scenario,
+        variant: str,
+        project: dict | None = None,
+        *,
+        lineage: dict | None = None,
+    ):
         self.run_id = str(uuid4())
         self.path = output / "runs" / self.run_id
         self.path.mkdir(parents=True, exist_ok=False)
@@ -52,7 +60,12 @@ class Bundle:
             "creation_intents": [],
             "artifacts": {},
             "plan_hash": digest(scenario.plan()),
+            # Replay/comparison provenance; an ordinary run has no source.
+            "origin": (lineage or {}).get("origin", "run"),
         }
+        for key in ("source_run_id", "source_plan_hash", "group_id", "comparison"):
+            if lineage and key in lineage:
+                self.manifest[key] = lineage[key]
         self.write("plan.json", scenario.plan())
         if project is not None:
             self.write("project.json", {"project_artifact_version": 1, "configuration": project})

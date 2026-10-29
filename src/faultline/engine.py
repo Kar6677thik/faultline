@@ -15,12 +15,16 @@ from faultline.projects import Project
 from faultline.scheduler import execute_attempts
 
 
-def run_one(scenario, variant, output, *, client=None, platform_info=None, project=None):
+def run_one(
+    scenario, variant, output, *, client=None, platform_info=None, project=None, lineage=None
+):
     # Direct Python callers must exclude recovery just as CLI callers do.
     if project is not None:
         project = Project.model_validate(project.configuration())
         variant = project.select_variant(variant)
+        identities = scenario._generation_identity
         scenario = project.scenario(scenario.model_dump(by_alias=True, exclude_unset=True))
+        scenario.keep_generation_identity(identities)
     adapter, identity = resolve_adapter(project, scenario, variant)
     check_alarm_available()
     with execution_lock(output):
@@ -44,6 +48,7 @@ def run_one(scenario, variant, output, *, client=None, platform_info=None, proje
                 client=client,
                 platform_info=platform_info,
                 project=project,
+                lineage=lineage,
             )
         except DeadlineExceeded as exc:
             # Initialization/finalization may have no time to write a complete report.
@@ -63,11 +68,18 @@ def _run_one(
     client=None,
     platform_info=None,
     project=None,
+    lineage=None,
 ):
     limits = scenario.limits
     deadlines = RunDeadlines(limits)
     with deadlines.stage("initializing", limits.provisioning_ms, started=deadlines.started):
-        bundle = Bundle(output, scenario, variant, project.configuration() if project else None)
+        bundle = Bundle(
+            output,
+            scenario,
+            variant,
+            project.configuration() if project else None,
+            lineage=lineage,
+        )
         bundle.manifest["platform"] = platform_info
         bundle.save_manifest()
         env = Environment(client, bundle, platform_info["images"], project)

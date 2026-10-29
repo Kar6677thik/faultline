@@ -57,3 +57,10 @@ Read [the experiment engine walkthrough](experiment-engine.md) for generators, c
 The [M2 acceptance report](../m2-acceptance-results.md) connects each milestone gate
 to actual tests and measurements, including failed development trials and their fixes.
 Decisions L-037 through L-045 explain the engine's design and limits in plain language.
+
+## Replay and comparison (M3, in progress)
+
+Read [replay, comparison, and honest repeat counts](replay.md) to learn why a strict
+replay refuses changed images or code, how a comparison records its differences, and
+how repeat groups count reproductions without hiding errors. Decisions L-046 through
+L-048 record the tradeoffs.

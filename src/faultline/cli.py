@@ -4,25 +4,34 @@ import json
 import signal
 from pathlib import Path
 from typing import Annotated
-from uuid import UUID, uuid4
+from uuid import UUID
 
 import typer
 from pydantic import ValidationError
 
 from faultline.adapter_loader import resolve_adapter
 from faultline.adapters import AdapterError
-from faultline.artifacts import atomic_json, read_bundle
+from faultline.artifacts import read_bundle
 from faultline.engine import run_one
 from faultline.environment import client_and_preflight
+from faultline.groups import Group, failure_signatures, summarize
 from faultline.locking import ActiveRunError, execution_lock
 from faultline.models import EXIT_CODES, digest, load_scenario
 from faultline.projects import load_project
 from faultline.recovery import recover, recovery_manifests
+from faultline.replay import (
+    ReplayRejected,
+    check_platform,
+    comparison_differences,
+    comparison_scenario,
+    load_source,
+    replay_scenario,
+)
 
 app = typer.Typer(
     no_args_is_help=True,
     pretty_exceptions_enable=False,
-    help="Faultline M1: disposable order correctness experiments. Linux/WSL2 execution.",
+    help="Faultline: disposable correctness experiments, replay, and comparison. Linux/WSL2.",
 )
 
 
@@ -173,8 +182,23 @@ def run(
         client, info = client_and_preflight(project=project, variant=variant)
     except Exception as exc:
         input_error(ctx, "run", exc)
+    group = (
+        Group(ctx.obj["output"], "repeated_run", scheduled=repeat, details={"variant": variant})
+        if repeat > 1
+        else None
+    )
+    execute_series(
+        ctx, "run", value, variant, project, client, info, repeat, group, lineage={"origin": "run"}
+    )
+
+
+def execute_series(
+    ctx, command, scenario, variant, project, client, info, repeat, group, *, lineage, extra=None
+):
+    """Serial fresh-environment runs; stops early on ERROR or interruption."""
     paths, reports = [], []
-    group_id = str(uuid4()) if repeat > 1 else None
+    if group is not None:
+        lineage = {**lineage, "group_id": group.id}
     # SIGTERM follows the same cleanup path as Ctrl+C.
     interrupt_requested = False
 
@@ -185,67 +209,205 @@ def run(
             raise KeyboardInterrupt
 
     previous = {sig: signal.signal(sig, interrupt) for sig in (signal.SIGINT, signal.SIGTERM)}
+    status = "completed"
     try:
         for index in range(repeat):
-            typer.echo(f"Run {index + 1}/{repeat}: {value.id} ({variant})", err=True)
+            typer.echo(f"{command} {index + 1}/{repeat}: {scenario.id} ({variant})", err=True)
             path, result = run_one(
-                value,
+                scenario,
                 variant,
                 ctx.obj["output"],
                 client=client,
                 platform_info=info,
                 project=project,
+                lineage=lineage,
             )
             paths.append(path)
             reports.append(result)
+            if group is not None:
+                group.add(result)
             if result["lifecycle"] == "interrupted" or result["verdict"] == "ERROR":
+                status = "stopped_early"
                 break
     except ActiveRunError as exc:
-        input_error(ctx, "run", exc)
+        if group is not None:
+            group.close("refused")
+        input_error(ctx, command, exc)
     except (Exception, KeyboardInterrupt) as exc:
-        input_error(ctx, "run", exc, 130 if isinstance(exc, KeyboardInterrupt) else 4)
+        if group is not None:
+            group.close("interrupted" if isinstance(exc, KeyboardInterrupt) else "harness_error")
+        input_error(ctx, command, exc, 130 if isinstance(exc, KeyboardInterrupt) else 4)
     finally:
         for sig, handler in previous.items():
             signal.signal(sig, handler)
         client.close()
-    counts = {state: sum(r["verdict"] == state for r in reports) for state in EXIT_CODES}
-    overall = next(state for state in ("ERROR", "FAIL", "INCONCLUSIVE", "PASS") if counts[state])
-    summary = {
-        "project": project.identity() if project else None,
-        "verdict": overall,
-        "counts": counts,
-        "scheduled": repeat,
-        "started": len(reports),
-        "unstarted": repeat - len(reports),
-        "cleanup_complete": all(r["cleanup"]["complete"] for r in reports),
-    }
+    interrupted = any(r["lifecycle"] == "interrupted" for r in reports)
+    if group is not None:
+        summary = group.close("interrupted" if interrupted else status)
+    else:
+        summary = summarize(reports, repeat, None)
+    summary = {"project": project.identity() if project else None, **summary, **(extra or {})}
     if len(reports) == 1:
         summary["coverage"] = reports[0]["coverage"]
         summary["violations"] = [r for r in reports[0]["invariants"] if r["status"] == "FAIL"]
-    if group_id:
-        group_path = ctx.obj["output"] / "groups" / f"{group_id}.json"
-        group_path.parent.mkdir(parents=True, exist_ok=True)
-        atomic_json(
-            group_path,
-            {
-                "group_schema_version": 1,
-                "group_id": group_id,
-                "kind": "repeated_run",
-                "run_ids": [r["run_id"] for r in reports],
-                **summary,
-            },
-        )
-    code = 130 if any(r["lifecycle"] == "interrupted" for r in reports) else EXIT_CODES[overall]
     finish(
         ctx,
-        "run",
-        code,
+        command,
+        130 if interrupted else EXIT_CODES[summary["verdict"] or "ERROR"],
         summary,
         paths=paths,
         run_ids=[r["run_id"] for r in reports],
-        group_id=group_id,
+        group_id=group.id if group else None,
         diagnostics=[d for r in reports for d in r["diagnostics"]],
     )
+
+
+def select_signature(report: dict, requested: str | None) -> tuple[str | None, list[dict]]:
+    """Pick the reproduction target; several candidates require an explicit choice."""
+    catalog = failure_signatures(report)
+    if requested is not None:
+        if requested not in catalog:
+            raise ValueError(f"signature not found in source run; choices: {sorted(catalog)}")
+        return requested, []
+    if len(catalog) == 1:
+        return next(iter(catalog)), []
+    if not catalog:
+        return None, []
+    return None, [
+        {
+            "code": "multiple_signatures",
+            "message": "Source has several violation signatures; pass --signature to count "
+            "reproductions",
+            "details": catalog,
+        }
+    ]
+
+
+def rejected(ctx, command, code, exc):
+    finish(
+        ctx,
+        command,
+        2,
+        {"differences": exc.differences},
+        diagnostics=[{"code": code, "message": str(exc)}],
+    )
+
+
+@app.command()
+def replay(
+    ctx: typer.Context,
+    bundle: str,
+    repeat: Annotated[int, typer.Option(min=1, max=100)] = 5,
+    signature: Annotated[str | None, typer.Option(help="target violation signature")] = None,
+):
+    """Strictly re-execute a saved plan in fresh environments; no overrides accepted."""
+    try:
+        source = load_source(resolve_bundle(bundle, ctx.obj["output"]))
+        target, notes = select_signature(source.report, signature)
+        scenario = replay_scenario(source)
+        client, info = client_and_preflight(project=source.project, variant=source.variant)
+        try:
+            check_platform(source, info)
+        except BaseException:
+            client.close()
+            raise
+    except ReplayRejected as exc:
+        rejected(ctx, "replay", "replay_incompatible", exc)
+    except Exception as exc:
+        input_error(ctx, "replay", exc)
+    details = {
+        "source_run_id": source.run_id,
+        "source_plan_hash": source.manifest["plan_hash"],
+        "variant": source.variant,
+    }
+    group = Group(ctx.obj["output"], "replay", scheduled=repeat, signature=target, details=details)
+    for note in notes:
+        typer.echo(f"{note['code']}: {note['message']}", err=True)
+    execute_series(
+        ctx,
+        "replay",
+        scenario,
+        source.variant,
+        source.project,
+        client,
+        info,
+        repeat,
+        group,
+        lineage={"origin": "replay", **details},
+        extra={"source_run_id": source.run_id},
+    )
+
+
+@app.command()
+def compare(
+    ctx: typer.Context,
+    bundle: str,
+    variant: Annotated[str, typer.Option(help="explicitly chosen comparison variant")],
+    repeat: Annotated[int, typer.Option(min=1, max=100)] = 5,
+    signature: Annotated[str | None, typer.Option(help="target violation signature")] = None,
+):
+    """Run a saved plan against a chosen variant; differences are recorded, not hidden."""
+    try:
+        source = load_source(resolve_bundle(bundle, ctx.obj["output"]))
+        target, _notes = select_signature(source.report, signature)
+        loaded = selected_project(ctx.obj["project"])
+        project = loaded.project if loaded else None
+        if project is not None:
+            variant = project.select_variant(variant)
+        elif variant not in {"unsafe", "correct"}:
+            raise ValueError("variant must be unsafe or correct")
+        scenario, identity = comparison_scenario(source, project, variant)
+        client, info = client_and_preflight(project=project, variant=variant)
+    except ReplayRejected as exc:
+        rejected(ctx, "compare", "comparison_invalid", exc)
+    except Exception as exc:
+        input_error(ctx, "compare", exc)
+    found = comparison_differences(source, scenario, identity, info, variant)
+    details = {
+        "source_run_id": source.run_id,
+        "source_plan_hash": source.manifest["plan_hash"],
+        "source_variant": source.variant,
+        "variant": variant,
+        "differences": found,
+    }
+    group = Group(
+        ctx.obj["output"], "comparison", scheduled=repeat, signature=target, details=details
+    )
+    execute_series(
+        ctx,
+        "compare",
+        scenario,
+        variant,
+        project,
+        client,
+        info,
+        repeat,
+        group,
+        lineage={
+            "origin": "comparison",
+            "source_run_id": source.run_id,
+            "source_plan_hash": source.manifest["plan_hash"],
+            "comparison": {"differences": found},
+        },
+        extra={"source_run_id": source.run_id, "differences": found},
+    )
+
+
+def read_group(value: str, output: Path) -> dict | None:
+    """A UUID naming a group record (and no run) shows that group's full breakdown."""
+    try:
+        identifier = str(UUID(value))
+    except ValueError:
+        return None
+    path = output / "groups" / f"{identifier}.json"
+    if (output / "runs" / identifier).exists() or not path.is_file() or path.is_symlink():
+        return None
+    if path.stat().st_size > 4194304:
+        raise ValueError("group record exceeds size limit")
+    record = json.loads(path.read_text(encoding="utf-8"))
+    if record.get("group_schema_version") != 1 or record.get("group_id") != identifier:
+        raise ValueError("unsupported or mismatched group record")
+    return record
 
 
 def resolve_bundle(value: str, output: Path) -> Path:
@@ -259,10 +421,21 @@ def resolve_bundle(value: str, output: Path) -> Path:
 def report(ctx: typer.Context, bundle: str):
     """Verify artifact hashes and inspect a run without Docker or adapter execution."""
     try:
+        group = read_group(bundle, ctx.obj["output"])
         path = resolve_bundle(bundle, ctx.obj["output"])
-        _manifest, result = read_bundle(path)
+        if group is None:
+            _manifest, result = read_bundle(path)
     except Exception as exc:
         input_error(ctx, "report", exc, 4)
+    if group is not None:
+        finish(
+            ctx,
+            "report",
+            130 if group["interrupted"] else EXIT_CODES[group["verdict"] or "ERROR"],
+            group,
+            run_ids=group["run_ids"],
+            group_id=group["group_id"],
+        )
     finish(
         ctx,
         "report",

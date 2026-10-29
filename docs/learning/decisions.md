@@ -447,3 +447,27 @@ These are implementation decisions, explained for learning. They complement the 
 **Reason:** the final generator contract changed after the full regression run. A focused real follow-up covers those changes without pretending the earlier run tested later source. The disk-full test injects an ENOSPC exception at the artifact boundary; it does not exhaust the user's physical disk.
 
 **Alternative and limit:** repeating every long Docker test after documentation or isolated contract changes adds cost without resolving new uncertainty. Focused checks supplement, rather than rename, the existing full pass. M2 completion does not establish deterministic execution, release-wide defect discrimination, CI performance, or M3/M4 functionality. The acceptance report links each claim to its actual evidence.
+
+## L-046: Make strict replay refuse rather than adapt
+
+**Choice:** rebuild the scenario from the saved `plan.json` and saved project configuration, then require an identical plan hash, engine version, adapter package/version/content hash, and complete platform record (OS, architecture, kernel, Docker version, every image ID, project hash, and variant). Any difference returns exit code 2 with the differing fields before resources are created.
+
+**ELI5:** repeating an experiment means using the same recipe, oven, and ingredients. If the oven was replaced, say so instead of calling it a repeat.
+
+**Reason:** a replay that silently uses a rebuilt image or edited verifier could "reproduce" or "fix" a failure for an unrelated reason. **Alternatives and tradeoffs:** tolerating minor version drift would make old evidence replayable longer, but nobody could tell which differences mattered. Re-reading the current project YAML would be convenient, but the file may have changed since the run. Because the bundled adapter's content hash covers all engine source, any source edit makes old bundles non-replayable; comparison is the supported route after upgrades. Replay still does not reproduce operating-system or transaction scheduling.
+
+## L-047: Separate comparison from replay and reject meaningless comparisons
+
+**Choice:** `compare` binds the saved plan to an explicitly named variant under the current project, records every environment and identity difference in the group and each new manifest, and rejects comparisons whose requests, invariant versions, or fixture identity differ.
+
+**ELI5:** comparing two flours is useful; comparing a cake with a pie is not.
+
+**Reason:** a before/after claim is only meaningful when the business inputs and the definition of correctness stay the same. **Alternative and cost:** allowing any comparison and printing a warning would let a different invariant version make a fix look successful. The current check cannot tell whether two different images are semantically equivalent; it reports the difference and leaves interpretation to the reader.
+
+## L-048: Count reproductions conservatively and persist groups per trial
+
+**Choice:** a reproduction is a completed FAIL that contains the target signature. ERROR and interrupted runs never count, even when they contain the violation. Report matching failures over started trials and over conclusive trials, with `not_available` for zero denominators. Rewrite the group record after every trial.
+
+**ELI5:** if the thermometer broke during an experiment, you cannot count that reading, even if it happened to show the number you expected.
+
+**Reason:** a harness error means the evidence chain is broken, so counting it would overstate reliability. Two denominators show both "how often did it happen per attempt" and "how often among trustworthy attempts" without hiding either. **Alternatives and tradeoffs:** a single success rate is easier to read but can hide errors; a probability estimate would claim more than a handful of trials supports. Group files are plain JSON and are not themselves hash-inventoried; they reference hash-verified run bundles.

@@ -108,7 +108,11 @@
 
 **Receipt:** a separate operational record of a cleanup attempt. It does not replace an experiment report or establish a business verdict.
 
-**Replay / repetition / reduction:** replay would reproduce a saved historical scenario under checked compatibility; repetition reruns current inputs with fresh fixtures; reduction would search for a smaller failing scenario. Only repetition is implemented now.
+**Replay / comparison / repetition / reduction:** strict replay reruns a saved plan with identical images, adapter code, engine, and platform, refusing any drift; comparison reruns a saved plan against an explicitly chosen variant and records every difference; repetition reruns current inputs with fresh fixtures; reduction would search for a smaller failing scenario. Replay, comparison, and repetition are implemented; reduction is not yet. See [replay](replay.md).
+
+**Violation signature:** an adapter's stable fingerprint of one failure: invariant, version, violation code, and logical business identity, without volatile row IDs or times. Reproduction counting targets one signature, not any FAIL.
+
+**Group / denominator:** a group is the saved record of several trials, such as a replay. A denominator is what a count is divided by; Faultline reports matching failures over started trials and over conclusive trials, and says `not_available` when a denominator is zero.
 
 **`REPEATABLE READ`:** PostgreSQL transaction isolation that gives the observation queries a consistent view during one snapshot transaction. It does not itself prove that no application writes will happen afterward; that requires quiescence.
 

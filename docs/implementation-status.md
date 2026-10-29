@@ -1,4 +1,4 @@
-# Implementation status: M2 experiment engine complete
+# Implementation status: M2 complete, M3 in progress
 
 This page describes executable behavior. The numbered files in `specs/` define the target v1 release. M2 is complete for the supported HTTP/PostgreSQL experiment engine; measured evidence and limits are recorded in [M2 acceptance results](m2-acceptance-results.md). The full v1 release is still pending.
 
@@ -8,12 +8,14 @@ This page describes executable behavior. The numbered files in `specs/` define t
 | --- | --- | --- |
 | M1: one trustworthy failure | Demonstrated | Original unsafe/correct PostgreSQL purchase remains a regression |
 | M2: usable experiment engine | Complete | Materialized plans, concurrency, fault controllers, public adapter integration, lifecycle evidence |
-| M3: replay, reduction, investigation | Pending | Strict historical replay, reproduction groups, reduction, read-only API and React |
+| M3: replay, reduction, investigation | In progress | Strict replay, comparison, and repeat groups implemented; reduction, read-only API and React pending |
 | M4: calibrated release and CI | Pending | Independent correct-B, transfer domain, defect corpus, CI/release packaging and resource measurements |
 
 ## Implemented behavior
 
-- Python CLI: doctor, validate, run, report, and scoped clean. Repetitions create fresh fixtures; they are not deterministic replay.
+- Python CLI: doctor, validate, run, replay, compare, report, and scoped clean. Repetitions create fresh fixtures; they are not deterministic replay.
+- Strict replay (`replay RUN`, default five trials) rebuilds the saved materialized plan and saved project configuration. It refuses before provisioning unless the plan hash, engine version, adapter package/version/content hash, and complete platform record (OS, architecture, kernel, Docker version, every image ID, project hash, variant) are identical. Comparison (`compare RUN --variant NAME`) runs the same plan against an explicitly chosen variant, records every difference in the group and each manifest, and rejects changed requests, invariant versions, or fixture identity. Neither reproduces OS or transaction scheduling.
+- Repeat, replay, and comparison groups persist after every trial under `<output>/groups/`. They count scheduled, started, completed, interrupted, and unstarted trials; each verdict; and matching versus other failures for a target signature. Reproduction is reported per started and per conclusive trial, with `not_available` for zero denominators. ERROR and interrupted runs never count as reproductions. `report GROUP_ID` shows a group.
 - Strict bounded JSON-compatible YAML, including duplicate/alias/unknown-field rejection. Generic HTTP/JSON requests remain confined to declared internal routes. Adapter validation checks domain-specific inputs and expectations.
 - Up to 1000 operations, 5000 potential attempts, 32 fault rules, and concurrency 1-32, within project/scenario budgets. At most five attempts per operation. Explicit HTTP-status or transport retry policies, immutable retry bodies, unused-attempt records, dependency gates, and barriers.
 - The bundled versioned `orders.purchases` and installed adapter generators expand before execution. Returned operations undergo request, graph, count, and project-budget checks. Plans save concrete inputs, body bytes/hashes, effective defaults, potential attempt IDs, fixture digest, and invariant versions. Three-process tests compare canonical output exactly for orders and the independent counter.
@@ -43,6 +45,8 @@ See [the experiment-engine walkthrough](learning/experiment-engine.md), [externa
 
 ## Verification status
 
+M3 Phase A validation on 2026-10-29: **315 unit tests passed**, with 40 Docker tests skipped; lint and format passed. After a runtime rebuild, the real replay/comparison case **passed in 120.61 seconds**. It produced 3/3 matching duplicate-debit replays with byte-identical plans and image IDs, and a 2/2 PASS comparison against the corrected variant whose only recorded differences were `variant` and `platform.variant`. See [M3 acceptance results](m3-acceptance-results.md). The full 40-case Docker regression was not rerun for this phase.
+
 Latest M2 validation on 2026-10-24: **299 unit tests passed**, with 40 Docker tests explicitly skipped; lint and format checks passed. The full **38-case Docker/PostgreSQL regression passed in 827.82 seconds** before the last generator contract refinements. After those refinements and a runtime rebuild, **four focused Docker cases passed in 82.09 seconds**, including both external retry variants and two generated workloads. These are separate build/test phases, not a single 40-case pass on the final revision. The unsafe counter produced FAIL with total 14, the correct retry case PASS with total 7, generated counters PASS with total 186, and generated orders PASS with 600000 paise of debits. No owned containers or networks remained. [M2 acceptance results](m2-acceptance-results.md) maps AT-007 through AT-013 to source/tests, includes failed provisioning phases and fixes, and records exact runtime IDs.
 
 Latest creation-recovery validation on 2026-10-24: **260 unit tests passed**, with 22 Docker tests explicitly skipped; the corrected full **22-case Docker/PostgreSQL suite passed in one invocation (310.91 seconds)**. Both real SIGKILL creation-window cases recovered IDs absent from their original manifests, preserved all original files, and passed repeated cleanup. The first integration invocation exposed a SIGTERM/event-sequence race after 14 passing cases; the fix and new artifact tests preceded the rebuilt runtime and full corrected pass. No owned resources remained. See [creation-recovery acceptance results](creation-recovery-acceptance-results.md) for separate phase measurements. This does not claim deterministic replay or machine-crash durability.
@@ -64,4 +68,4 @@ The original rejected trial, corrections, environment, and evidence locations ar
 
 ## Next boundary
 
-Two milestones remain. M3 begins with strict historical replay and compatibility checks over saved materialized plans, followed by reproduction groups, dependency-aware reduction, and the read-only React investigation interface. M4 covers independent implementations, transfer/defect calibration, CI/release packaging, and measured resource targets. Historical measurements above remain separate from future results.
+Two milestones remain. M3 has strict replay, comparison, and reproduction groups; dependency-aware reduction, the read-only API, and the React investigation interface remain. M4 covers independent implementations, transfer/defect calibration, CI/release packaging, and measured resource targets. Historical measurements above remain separate from future results.
