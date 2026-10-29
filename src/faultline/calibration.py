@@ -106,7 +106,13 @@ def summarize_pair(trials: list[dict], target: dict | None, strict: bool = False
 
 
 def run_corpus(
-    corpus_path: Path, output: Path, trials: int, only: str, timeout: int, strict: bool = False
+    corpus_path: Path,
+    output: Path,
+    trials: int,
+    only: str,
+    timeout: int,
+    strict: bool = False,
+    variant: str | None = None,
 ) -> dict:
     corpus = load_corpus(corpus_path)
     base = corpus_path.parent
@@ -122,8 +128,11 @@ def run_corpus(
             for scenario in corpus["correct"]["scenarios"]
             for variant in corpus["correct"]["variants"]
         ]
+    if variant is not None:
+        pairs = [pair for pair in pairs if pair[1] == variant]
     record = {
         "calibration_schema_version": 1,
+        "variant_filter": variant,
         "corpus": str(corpus_path),
         "profile": corpus["profile"],
         "trials_per_pair": trials,
@@ -199,6 +208,7 @@ def main(argv=None) -> int:
     parser.add_argument(
         "--strict", action="store_true", help="require detection in every defect trial (CI)"
     )
+    parser.add_argument("--variant", help="run only pairs for this variant")
     args = parser.parse_args(argv)
     if not 1 <= args.trials <= 100:
         parser.error("--trials must be between 1 and 100")
@@ -209,6 +219,7 @@ def main(argv=None) -> int:
         args.only,
         args.trial_timeout,
         args.strict,
+        args.variant,
     )
     print(json.dumps({"met": record["met"], "summary": str(args.output / "calibration.md")}))
     return 0 if record["met"] else 1
