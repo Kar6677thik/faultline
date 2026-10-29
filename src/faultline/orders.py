@@ -78,7 +78,7 @@ def connect(role: str = "app", *, autocommit: bool = False):
 
 
 def prepare(variant: str, fixture: str = "standard_wallet") -> dict:
-    if variant not in {"unsafe", "correct"} or fixture not in SEEDS:
+    if variant not in VARIANTS or fixture not in SEEDS:
         raise ValueError("unsupported variant or fixture")
     with connect("setup") as conn:
         conn.execute(SCHEMA)
@@ -87,6 +87,7 @@ def prepare(variant: str, fixture: str = "standard_wallet") -> dict:
             conn.execute("INSERT INTO accounts VALUES (%s, %s)", account)
         for product in SEEDS[fixture]["products"]:
             conn.execute("INSERT INTO products VALUES (%s, %s, %s)", product)
+        # Only correct-A relies on uniqueness; correct-B and the defects must not.
         if variant == "correct":
             conn.execute("CREATE UNIQUE INDEX purchase_identity ON orders(account_id, purchase_id)")
             conn.execute("CREATE UNIQUE INDEX retry_identity ON idempotency(account_id, key)")
@@ -184,109 +185,155 @@ class Rejection(Exception):
         self.code, self.status = code, status
 
 
+ORDER_COLUMNS = (
+    "order_id",
+    "purchase_id",
+    "account_id",
+    "sku",
+    "quantity",
+    "amount_minor",
+    "currency",
+    "status",
+)
+# Each known-bad variant removes exactly one safeguard from correct-A's code path.
+# They exercise real database behaviour; none returns fabricated failure data.
+DEFECTS = {
+    "unsafe": "missing idempotency: no key or purchase-identity check",
+    "racy_idempotency": "identity check runs before taking any lock (check-then-insert race)",
+    "non_atomic": "debit commits in one transaction, order effects in a second",
+    "lost_update": "balance is read without a lock and written back as an absolute value",
+    "payload_unchecked": "an existing key is replayed without comparing its payload",
+    "missing_outbox": "the confirmation outbox intent is never written",
+}
+VARIANTS = ("correct", "correct_b", *DEFECTS)
+
+
+def _identity_checks(conn, payload: dict, key: str, variant: str):
+    """Return an existing order for a replay, or None; raise on conflicts."""
+    token = conn.execute(
+        "SELECT * FROM idempotency WHERE account_id = %s AND key = %s",
+        (payload["account_id"], key),
+    ).fetchone()
+    if token and token["fingerprint"] != digest(payload) and variant != "payload_unchecked":
+        raise Rejection("idempotency_conflict")
+    if token and variant == "payload_unchecked":
+        # The defect: the stored result is returned for whatever payload arrived.
+        return conn.execute(
+            "SELECT * FROM orders WHERE order_id = %s", (token["order_id"],)
+        ).fetchone()
+    existing = conn.execute(
+        "SELECT * FROM orders WHERE account_id = %s AND purchase_id = %s",
+        (payload["account_id"], payload["purchase_id"]),
+    ).fetchone()
+    if existing and any(existing[k] != v for k, v in payload.items()):
+        raise Rejection("purchase_conflict")
+    return existing
+
+
+def _record_token(conn, payload: dict, key: str, order_id: str, variant: str):
+    # The unsafe variant deliberately records each token without enforcing uniqueness.
+    if (
+        variant == "unsafe"
+        or not conn.execute(
+            "SELECT 1 FROM idempotency WHERE account_id = %s AND key = %s",
+            (payload["account_id"], key),
+        ).fetchone()
+    ):
+        conn.execute(
+            "INSERT INTO idempotency VALUES (%s,%s,%s,%s,%s)",
+            (str(uuid4()), payload["account_id"], key, digest(payload), order_id),
+        )
+
+
 def transact_order(payload: dict, key: str, variant: str) -> dict:
-    """Return only after the database transaction has committed."""
-    fingerprint = digest(payload)
+    """Correct-A and its single-defect variants; returns only after commit."""
+    if variant == "correct_b":
+        from faultline.orders_b import transact_serializable
+
+        return transact_serializable(payload, key)
+    if variant not in VARIANTS:
+        raise ValueError("unsupported variant")
+    precheck = None
+    if variant == "racy_idempotency":
+        # The defect: identity is checked in its own transaction, before any lock.
+        with connect() as conn:
+            precheck = _identity_checks(conn, payload, key, variant)
+        if precheck:
+            return precheck
     with connect() as conn:
+        lock = "" if variant == "lost_update" else " FOR UPDATE"
         account = conn.execute(
-            "SELECT * FROM accounts WHERE account_id = %s FOR UPDATE", (payload["account_id"],)
+            "SELECT * FROM accounts WHERE account_id = %s" + lock, (payload["account_id"],)
         ).fetchone()
         if account is None:
             raise Rejection("invalid_request", 422)
         existing = None
-        if variant == "correct":
-            token = conn.execute(
-                "SELECT * FROM idempotency WHERE account_id = %s AND key = %s",
-                (payload["account_id"], key),
-            ).fetchone()
-            if token and token["fingerprint"] != fingerprint:
-                raise Rejection("idempotency_conflict")
-            existing = conn.execute(
-                "SELECT * FROM orders WHERE account_id = %s AND purchase_id = %s",
-                (payload["account_id"], payload["purchase_id"]),
-            ).fetchone()
-            if existing and any(existing[k] != v for k, v in payload.items()):
-                raise Rejection("purchase_conflict")
+        if variant not in {"unsafe", "racy_idempotency"}:
+            existing = _identity_checks(conn, payload, key, variant)
         if existing:
-            result = existing
-        else:
-            product = conn.execute(
-                "SELECT * FROM products WHERE sku = %s FOR UPDATE", (payload["sku"],)
-            ).fetchone()
-            if product is None:
-                raise Rejection("invalid_request", 422)
-            amount = product["price_minor"] * payload["quantity"]
-            if account["balance_minor"] < amount:
-                raise Rejection("insufficient_funds")
-            if product["stock"] < payload["quantity"]:
-                raise Rejection("insufficient_stock")
-            result = dict(
-                payload,
-                order_id=str(uuid4()),
-                amount_minor=amount,
-                currency="INR",
-                status="confirmed",
-            )
+            _record_token(conn, payload, key, existing["order_id"], variant)
+            return existing
+        product = conn.execute(
+            "SELECT * FROM products WHERE sku = %s FOR UPDATE", (payload["sku"],)
+        ).fetchone()
+        if product is None:
+            raise Rejection("invalid_request", 422)
+        amount = product["price_minor"] * payload["quantity"]
+        if account["balance_minor"] < amount:
+            raise Rejection("insufficient_funds")
+        if product["stock"] < payload["quantity"]:
+            raise Rejection("insufficient_stock")
+        result = dict(
+            payload, order_id=str(uuid4()), amount_minor=amount, currency="INR", status="confirmed"
+        )
+        if variant == "lost_update":
+            # The defect: an absolute write based on a possibly stale, unlocked read.
             conn.execute(
-                "INSERT INTO orders VALUES (%s,%s,%s,%s,%s,%s,%s,%s)",
-                tuple(
-                    result[k]
-                    for k in (
-                        "order_id",
-                        "purchase_id",
-                        "account_id",
-                        "sku",
-                        "quantity",
-                        "amount_minor",
-                        "currency",
-                        "status",
-                    )
-                ),
+                "UPDATE accounts SET balance_minor = %s WHERE account_id = %s",
+                (account["balance_minor"] - amount, payload["account_id"]),
             )
+        else:
             conn.execute(
                 "UPDATE accounts SET balance_minor = balance_minor - %s WHERE account_id = %s",
                 (amount, payload["account_id"]),
             )
-            conn.execute(
-                "UPDATE products SET stock = stock - %s WHERE sku = %s",
-                (payload["quantity"], payload["sku"]),
-            )
-            conn.execute(
-                "INSERT INTO ledger VALUES (%s,%s,%s,%s,'debit',%s,'INR')",
-                (
-                    str(uuid4()),
-                    payload["account_id"],
-                    payload["purchase_id"],
-                    result["order_id"],
-                    amount,
-                ),
-            )
-            conn.execute(
-                "INSERT INTO movements VALUES (%s,%s,%s,%s,%s)",
-                (
-                    str(uuid4()),
-                    payload["sku"],
-                    payload["purchase_id"],
-                    result["order_id"],
-                    -payload["quantity"],
-                ),
-            )
+        conn.execute(
+            "INSERT INTO ledger VALUES (%s,%s,%s,%s,'debit',%s,'INR')",
+            (
+                str(uuid4()),
+                payload["account_id"],
+                payload["purchase_id"],
+                result["order_id"],
+                amount,
+            ),
+        )
+        if variant == "non_atomic":
+            # The defect: the debit becomes durable before the order exists.
+            conn.commit()
+        conn.execute(
+            "INSERT INTO orders VALUES (%s,%s,%s,%s,%s,%s,%s,%s)",
+            tuple(result[k] for k in ORDER_COLUMNS),
+        )
+        conn.execute(
+            "UPDATE products SET stock = stock - %s WHERE sku = %s",
+            (payload["quantity"], payload["sku"]),
+        )
+        conn.execute(
+            "INSERT INTO movements VALUES (%s,%s,%s,%s,%s)",
+            (
+                str(uuid4()),
+                payload["sku"],
+                payload["purchase_id"],
+                result["order_id"],
+                -payload["quantity"],
+            ),
+        )
+        if variant != "missing_outbox":
             conn.execute(
                 "INSERT INTO outbox VALUES (%s,%s,%s,'order_confirmed',%s)",
                 (str(uuid4()), payload["purchase_id"], result["order_id"], Jsonb(result)),
             )
-        # The unsafe variant deliberately records each token without enforcing uniqueness.
-        if (
-            variant == "unsafe"
-            or not conn.execute(
-                "SELECT 1 FROM idempotency WHERE account_id = %s AND key = %s",
-                (payload["account_id"], key),
-            ).fetchone()
-        ):
-            conn.execute(
-                "INSERT INTO idempotency VALUES (%s,%s,%s,%s,%s)",
-                (str(uuid4()), payload["account_id"], key, fingerprint, result["order_id"]),
-            )
+        _record_token(conn, payload, key, result["order_id"], variant)
     return result
 
 

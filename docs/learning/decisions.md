@@ -519,3 +519,19 @@ These are implementation decisions, explained for learning. They complement the 
 **ELI5:** the display cards are printed in advance and shipped in the box, so visitors do not need a printing press.
 
 **Reason:** reviewers should not need Node.js to look at evidence, and every third-party script would be another place untrusted code could come from. **Alternatives and tradeoffs:** server-rendered HTML would avoid JavaScript but make paginated timelines and keyboard navigation harder. A component library would speed up styling but add dependencies and assets to audit. The built assets are committed; rebuilding requires Node 20 (`web/`), and the committed bundle must be rebuilt whenever `web/src` changes.
+
+## L-055: Make correct-B a different technique, not a configuration of correct-A
+
+**Choice:** correct-B is a separate module using `SERIALIZABLE` transactions with bounded, jittered retries. It has no row locks and no unique indexes, writes absolute values, and rebuilds replay responses from the stored order row. Unit tests guard that it does not call A's functions or use `FOR UPDATE`.
+
+**ELI5:** two students solve the same exam with different methods. If both get full marks, the exam is probably testing the subject, not one student's handwriting.
+
+**Reason:** spec 04 requires an independent second implementation, so that an invariant that only holds because of A's locking style is exposed. **Alternatives and tradeoffs:** a flag inside A would share all of its assumptions. A second web framework would add dependencies without changing the transaction technique, which is the part that matters. B can still return 503 when its retries run out under heavy contention; scenarios retry on 503.
+
+## L-056: Each known-bad variant removes exactly one safeguard, and races get room through declared faults
+
+**Choice:** the defect variants are small, named deviations from correct-A (`DEFECTS` in `orders.py`). Race-dependent defects are exercised under a declared database-latency fault rather than by adding sleeps to the application.
+
+**ELI5:** to test a smoke alarm you light a real match, not a picture of a flame. If the match is too small to notice, you hold it closer instead of painting smoke.
+
+**Reason:** a single deviation makes the cause of each detection obvious and keeps the variants honest. The first probes showed `racy_idempotency` and `lost_update` passing because the handlers were too fast to overlap. Slow, recorded network conditions are a legitimate experiment variable; secret application sleeps would turn a real defect into a staged one. **Limit:** detection under latency says nothing about how often the race happens in production traffic.

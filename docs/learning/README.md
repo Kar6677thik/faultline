@@ -75,3 +75,10 @@ Finally, read [the evidence viewer and local API](viewer.md) to see why the serv
 read-only and loopback-only, how its token is handed out, and how the React viewer
 leads from a run to the exact ledger rows. Decisions L-052 through L-054 explain the
 web boundary, integrity checks, and packaging.
+
+## Calibration (M4, in progress)
+
+Read [calibrating the judge](calibration.md) to see the known-bad order variants,
+the independently written correct-B, how real races are made observable with a
+declared latency fault, and how the calibration tool counts detections. Decisions
+L-055 and L-056 record why.

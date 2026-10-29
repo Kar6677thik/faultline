@@ -1,0 +1,62 @@
+{
+  "schema_version": 1,
+  "id": "idempotency_payload_conflict",
+  "adapter_profile": "orders_v1",
+  "fixture": "standard_wallet",
+  "seed": 42,
+  "operations": [
+    {
+      "id": "purchase_a",
+      "kind": "create_order",
+      "logical_id": "purchase-a",
+      "route": "orders_api",
+      "request": {
+        "method": "POST",
+        "path": "/orders",
+        "headers": {
+          "Idempotency-Key": "purchase-a-key"
+        },
+        "json": {
+          "purchase_id": "purchase-a",
+          "account_id": "buyer-a",
+          "sku": "sku-a",
+          "quantity": 1
+        }
+      },
+      "timeout_ms": 2000
+    },
+    {
+      "id": "conflicting_replay",
+      "kind": "create_order",
+      "logical_id": "purchase-a",
+      "route": "orders_api",
+      "request": {
+        "method": "POST",
+        "path": "/orders",
+        "headers": {
+          "Idempotency-Key": "purchase-a-key"
+        },
+        "json": {
+          "purchase_id": "purchase-a",
+          "account_id": "buyer-a",
+          "sku": "sku-a",
+          "quantity": 2
+        }
+      },
+      "timeout_ms": 2000,
+      "after": [
+        "purchase_a"
+      ],
+      "expectation": "idempotency_conflict"
+    }
+  ],
+  "invariants": [
+    "orders.at_most_one_debit",
+    "orders.purchase_atomicity",
+    "orders.wallet_conservation",
+    "orders.inventory_conservation",
+    "orders.confirmation_intent",
+    "orders.idempotency_contract",
+    "orders.completed_purchase"
+  ]
+}

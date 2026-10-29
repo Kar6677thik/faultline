@@ -9,7 +9,7 @@ This page describes executable behavior. The numbered files in `specs/` define t
 | M1: one trustworthy failure | Demonstrated | Original unsafe/correct PostgreSQL purchase remains a regression |
 | M2: usable experiment engine | Complete | Materialized plans, concurrency, fault controllers, public adapter integration, lifecycle evidence |
 | M3: replay, reduction, investigation | Complete | Strict replay, comparison, repeat groups, dependency-aware reduction, read-only API, React viewer |
-| M4: calibrated release and CI | Pending | Independent correct-B, transfer domain, defect corpus, CI/release packaging and resource measurements |
+| M4: calibrated release and CI | In progress (order corpus and correct-B implemented; transfer domain, 20-trial calibration, CI pending) | Independent correct-B, transfer domain, defect corpus, CI/release packaging and resource measurements |
 
 ## Implemented behavior
 
@@ -34,6 +34,8 @@ This page describes executable behavior. The numbered files in `specs/` define t
 
 - `serve` provides a read-only FastAPI server bound only to 127.0.0.1, with a per-launch bearer token delivered in the URL fragment. It enforces Host/Origin checks, rejects mutation methods (405), sends no CORS headers, and applies a strict CSP. Artifacts are downloaded by opaque inventory ID after re-hashing. Integers for money, nanoseconds, and unsafe values are presented as decimal strings. It offers stable cursor pagination, paged events, snapshot record sets, groups from the CLI-selected sibling root, and RUNNING/INTERRUPTED labels for unfinished bundles. A packaged React viewer (`src/faultline/viewer/`, built from `web/`) leads from the run list to violations, planned-versus-observed attempts, fault acknowledgments, baseline/final rows, and group outcomes, with distinct load states and keyboard-operable controls.
 - `read_bundle` distinguishes unsupported versions (`UnsupportedArtifact`, API 409) from corruption (API 422). It also rejects duplicate event IDs, truncated last lines, and report attempts without recorded client outcomes.
+
+- The bundled order application has eight variants: `correct` (correct-A), the independently written `correct_b` (serializable isolation with bounded retries), and six single-defect variants (`unsafe`, `racy_idempotency`, `non_atomic`, `lost_update`, `payload_unchecked`, `missing_outbox`). `examples/orders/corpus.json` pairs each defect with a scenario and target violation and lists the scenarios both correct variants must pass. `python -m faultline.calibration` runs every trial through the CLI in fresh environments and counts detections only from completed FAILs that contain the target. Single-trial probes on 2026-10-29 detected all six defects, and both correct variants passed the new scenarios; the 20-trial calibration (AT-021/AT-022) has not been run yet.
 
 ## Supported boundaries and limitations
 

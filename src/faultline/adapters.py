@@ -19,6 +19,17 @@ from faultline.models import (
     digest,
 )
 
+# Declared independently of the application module, which keeps its own list.
+ORDER_VARIANTS = (
+    "correct",
+    "correct_b",
+    "unsafe",
+    "racy_idempotency",
+    "non_atomic",
+    "lost_update",
+    "payload_unchecked",
+    "missing_outbox",
+)
 PositiveVersion = Annotated[int, Field(ge=1)]
 Nonempty = Annotated[str, Field(min_length=1, max_length=1024)]
 Hash = Annotated[str, Field(pattern=r"^[0-9a-f]{64}$")]
@@ -184,7 +195,7 @@ class OrdersAdapter:
             "operations": ["create_order"],
             "faults": ["response_suppress", "proxy_latency", "proxy_disconnect", "process_restart"],
             "invariants": dict.fromkeys(INVARIANTS, 1),
-            "variants": ["unsafe", "correct"],
+            "variants": list(ORDER_VARIANTS),
             "concurrency": 32,
             "authority": "postgresql",
             "quiescence": "graceful_process_exit_and_database_sessions",

@@ -1,0 +1,77 @@
+{
+  "schema_version": 1,
+  "id": "restart_during_purchase",
+  "adapter_profile": "orders_v1",
+  "fixture": "standard_wallet",
+  "seed": 42,
+  "operations": [
+    {
+      "id": "purchase_a",
+      "kind": "create_order",
+      "logical_id": "purchase-a",
+      "route": "orders_api",
+      "request": {
+        "method": "POST",
+        "path": "/orders",
+        "headers": {
+          "Idempotency-Key": "purchase-a-key"
+        },
+        "json": {
+          "purchase_id": "purchase-a",
+          "account_id": "buyer-a",
+          "sku": "sku-a",
+          "quantity": 1
+        }
+      },
+      "timeout_ms": 5000,
+      "after_faults": [
+        "slow_database"
+      ],
+      "retry": {
+        "max_attempts": 5,
+        "on": [
+          "timeout",
+          "connection_error",
+          "http_503"
+        ],
+        "backoff_ms": [
+          1500,
+          2000,
+          2000,
+          2000
+        ]
+      }
+    }
+  ],
+  "invariants": [
+    "orders.at_most_one_debit",
+    "orders.purchase_atomicity",
+    "orders.wallet_conservation",
+    "orders.inventory_conservation",
+    "orders.confirmation_intent",
+    "orders.idempotency_contract",
+    "orders.completed_purchase"
+  ],
+  "faults": [
+    {
+      "id": "slow_database",
+      "kind": "proxy_latency",
+      "target": "database",
+      "trigger": {
+        "offset_ms": 0
+      },
+      "latency_ms": 100,
+      "direction": "downstream",
+      "duration_ms": 4000
+    },
+    {
+      "id": "crash",
+      "kind": "process_restart",
+      "target": "application",
+      "trigger": {
+        "offset_ms": 2700
+      },
+      "downtime_ms": 500
+    }
+  ]
+}

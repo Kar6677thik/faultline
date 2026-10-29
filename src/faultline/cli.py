@@ -10,6 +10,7 @@ import typer
 from pydantic import ValidationError
 
 from faultline.adapter_loader import resolve_adapter
+from faultline.adapters import ORDER_VARIANTS as BUNDLED_VARIANTS
 from faultline.adapters import AdapterError
 from faultline.artifacts import read_bundle
 from faultline.engine import run_one
@@ -184,8 +185,8 @@ def run(
         value, project = experiment_inputs(ctx, scenario)
         if project is not None:
             variant = project.select_variant(variant)
-        elif variant not in {"unsafe", "correct"}:
-            raise ValueError("variant must be unsafe or correct")
+        elif variant not in BUNDLED_VARIANTS:
+            raise ValueError(f"variant must be one of {', '.join(BUNDLED_VARIANTS)}")
         resolve_adapter(project, value, variant)
         client, info = client_and_preflight(project=project, variant=variant)
     except Exception as exc:
@@ -366,8 +367,8 @@ def compare(
         project = loaded.project if loaded else None
         if project is not None:
             variant = project.select_variant(variant)
-        elif variant not in {"unsafe", "correct"}:
-            raise ValueError("variant must be unsafe or correct")
+        elif variant not in BUNDLED_VARIANTS:
+            raise ValueError(f"variant must be one of {', '.join(BUNDLED_VARIANTS)}")
         scenario, identity = comparison_scenario(source, project, variant)
         client, info = client_and_preflight(project=project, variant=variant)
     except ReplayRejected as exc:
