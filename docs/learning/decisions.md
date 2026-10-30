@@ -551,3 +551,35 @@ These are implementation decisions, explained for learning. They complement the 
 **ELI5:** a new subject gets its own textbook and answer key; the exam hall stays the same.
 
 **Reason:** AT-023 requires the same engine to judge a second domain without order-specific core code. Sharing the order verifier's helpers would hide accidental coupling. **Limit:** the transfer domain has one correct implementation, so its correct-variant evidence is narrower than the order domain's.
+
+## L-059: Gate CI on calibrated outcomes, not exit codes, with least privilege
+
+**Choice:** three jobs: checks; a correct-variant gate; and a strict known-defect gate. Both Docker gates run through `faultline.calibration`, which judges each trial from its report. Actions are pinned to commit SHAs, the token is read-only, `pull_request_target` is not used, evidence is uploaded with `if: always()` for seven days from a non-hidden directory, and the viewer's committed build must match a fresh build.
+
+**ELI5:** the smoke-alarm test passes when *the alarm* goes off for *the match*, not merely because something beeped.
+
+**Reason:** a known-bad run exits 1 by design. Treating "exit 1" as success would also accept a different failure or a crash. **Alternatives and tradeoffs:** running all 20-trial matrices on every pull request would take hours on hosted runners; CI runs one trial per pair, and the 20-trial results are recorded release evidence. `upload-artifact` skips hidden paths by default, which is why CI writes to `ci-evidence/` rather than `.faultline/`. The CI workflow has not yet run on GitHub-hosted runners; its first real run may reveal timing differences on those machines.
+
+## L-060: Report resource and frequency measurements with their machine and method
+
+**Choice:** measurement and calibration outputs record the host's CPUs, memory, kernel, Docker version, sampling interval, every run's wall time, and leak counts. Peaks come from periodic sampling and are reported as lower bounds. Targets (60 s warm run, 10-minute PR matrix, 4-core/8 GiB budget) are compared against these measured values, never assumed.
+
+**ELI5:** write down which kitchen and which stopwatch you used, or the baking times mean nothing to anyone else.
+
+**Reason:** spec 10 asks for actual measurements and explicit scope changes if targets are missed. **Limit:** the reference Docker VM exposes 14 CPUs and about 7.2 GiB of memory. Memory is within the 8 GiB budget, but CPUs are not limited to 4, so timings may be faster than on a true 4-core host. Peak memory shows that the experiment fits the memory budget; it does not show how the experiment would perform on a 4-core host.
+
+## L-061: Let drain helper calls share the stage budget, and raise the drain and observation defaults
+
+**Choice:** the order drain's three observer helper calls now use the remaining drain budget instead of a fixed 5 s each. The graceful stop may use at most half of what remains. The default `drain_ms` and `observation_ms` rise from 10 s to 30 s, and the snapshot transport timeout is 60 s. Stage alarms still bound every step.
+
+**ELI5:** if the bus is late because of traffic, you don't declare the passenger missing after five minutes; you wait as long as the whole trip allows.
+
+**Reason:** the first 20-trial correct-A matrix (revision 973e27e) had 0 FAIL but 6 INCONCLUSIVE and 4 ERROR, all in the drain step. They clustered in two windows when every step on the host slowed 2-3x. ERRORs had not reached the first registry event: the hard-coded 5 s helper timeout expired while `docker exec` was starting Python. The verdicts were honest (no false PASS), but the harness was fragile. **Alternatives and tradeoffs:** retrying the helper would hide real hangs; dropping the evidence calls would weaken quiescence. Longer defaults lengthen the worst case of a genuinely hung run by up to 40 s. The pre-fix matrix is kept as evidence under `orders-correct-a-before-drain-fix`.
+
+## L-062: Give probabilistic defects enough CI trials to be seen, and say so in the corpus
+
+**Choice:** a corpus defect may declare `"detection": "probabilistic"` with `min_trials`. In `--strict` (CI) mode such a pair runs at least `min_trials` times and needs one detection with no harness ERROR. Deterministic defects still need a detection in every trial. The crash-between-commits order defect declares `min_trials: 15` (6/20 measured).
+
+**ELI5:** you check a coin-flip bug several times before saying the alarm is broken; you check a guaranteed bug once.
+
+**Reason:** a single CI trial would miss this defect about 70% of the time. CI would then fail randomly, and people would learn to ignore it. **Limit:** at the measured rate, 15 trials still miss about 0.5% of the time. The declaration is visible in the corpus file, not hidden in CI settings.

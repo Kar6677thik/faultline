@@ -144,3 +144,30 @@ def test_transfer_corpus_pairs_validate_through_the_project():
         resolve_adapter(loaded.project, loaded.load_scenario(scenario), variant)
     # The instrumented checkpoint is excluded for the atomic variant, not silently passed.
     assert "checkpoint-restart.yaml" not in corpus["correct"]["scenarios"]
+
+
+def test_probabilistic_defects_need_one_detection_and_no_error_in_strict_mode():
+    some = [{"verdict": "PASS", "detected": False}, {"verdict": "FAIL", "detected": True}]
+    assert summarize_pair(some, TARGET, strict=True, probabilistic=True)["met"]
+    assert not summarize_pair(some, TARGET, strict=True)["met"]
+    errored = [*some, {"verdict": "ERROR", "detected": False}]
+    assert not summarize_pair(errored, TARGET, strict=True, probabilistic=True)["met"]
+    missed = [{"verdict": "PASS", "detected": False}] * 3
+    assert not summarize_pair(missed, TARGET, strict=True, probabilistic=True)["met"]
+
+
+def test_strict_mode_gives_probabilistic_defects_their_minimum_trials(monkeypatch, tmp_path):
+    corpus = json.loads(CORPUS.read_text())
+    corpus["defects"] = [d for d in corpus["defects"] if d["variant"] == "non_atomic"]
+    assert corpus["defects"][0]["detection"] == "probabilistic"
+    calls = []
+
+    def fake(scenario, variant, output, timeout, project=None):
+        calls.append(variant)
+        return {"verdict": "PASS", "lifecycle": "completed", "report": report("PASS")}
+
+    monkeypatch.setattr(calibration, "one_trial", fake)
+    monkeypatch.setattr(calibration, "load_corpus", lambda _p: corpus)
+    record = run_corpus(CORPUS, tmp_path / "out", 1, "defects", 60, strict=True)
+    assert len(calls) == corpus["defects"][0]["min_trials"]
+    assert not record["met"]  # zero detections is never acceptable

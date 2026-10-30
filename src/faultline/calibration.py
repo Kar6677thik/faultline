@@ -87,7 +87,9 @@ def one_trial(
     }
 
 
-def summarize_pair(trials: list[dict], target: dict | None, strict: bool = False) -> dict:
+def summarize_pair(
+    trials: list[dict], target: dict | None, strict: bool = False, probabilistic: bool = False
+) -> dict:
     counts = Counter(trial["verdict"] for trial in trials)
     summary = {
         "trials": len(trials),
@@ -96,10 +98,14 @@ def summarize_pair(trials: list[dict], target: dict | None, strict: bool = False
     }
     if target is not None:
         summary["detections"] = sum(t.get("detected", False) for t in trials)
-        # AT-021: at least one conclusive detection. Strict (CI): every trial, no ERROR.
-        summary["met"] = (
-            summary["detections"] == len(trials) if strict else summary["detections"] >= 1
-        )
+        # AT-021: at least one conclusive detection. Strict (CI): every trial, except that a
+        # declared probabilistic defect needs one detection and no harness ERROR.
+        if strict and not probabilistic:
+            summary["met"] = summary["detections"] == len(trials)
+        elif strict:
+            summary["met"] = summary["detections"] >= 1 and counts.get("ERROR", 0) == 0
+        else:
+            summary["met"] = summary["detections"] >= 1
     else:
         summary["met"] = counts.get("PASS", 0) == len(trials)
     return summary
@@ -120,11 +126,11 @@ def run_corpus(
     pairs = []
     if only in {"all", "defects"}:
         pairs += [
-            (d["defect"], d["variant"], d["scenario"], d["target"]) for d in corpus["defects"]
+            (d["defect"], d["variant"], d["scenario"], d["target"], d) for d in corpus["defects"]
         ]
     if only in {"all", "correct"}:
         pairs += [
-            ("correct", variant, scenario, None)
+            ("correct", variant, scenario, None, {})
             for scenario in corpus["correct"]["scenarios"]
             for variant in corpus["correct"]["variants"]
         ]
@@ -142,11 +148,20 @@ def run_corpus(
     }
     summary_path = output / "calibration.json"
     output.mkdir(parents=True, exist_ok=True)
-    for kind, variant, scenario, target in pairs:
-        entry = {"kind": kind, "variant": variant, "scenario": scenario, "target": target}
+    for kind, variant, scenario, target, declared in pairs:
+        probabilistic = declared.get("detection") == "probabilistic"
+        # In strict (CI) mode a probabilistic defect gets enough trials to be seen at all.
+        count = max(trials, declared.get("min_trials", 1)) if strict and probabilistic else trials
+        entry = {
+            "kind": kind,
+            "variant": variant,
+            "scenario": scenario,
+            "target": target,
+            "detection": declared.get("detection", "deterministic"),
+        }
         record["pairs"].append(entry)
         results = []
-        for index in range(trials):
+        for index in range(count):
             trial = one_trial(base / scenario, variant, output, timeout, project)
             report = trial.pop("report", None)
             if target is not None and report is not None:
@@ -157,10 +172,10 @@ def run_corpus(
                     for item in failure_signatures(report).values()
                 )
             results.append(trial)
-            entry.update(results=results, **summarize_pair(results, target, strict))
+            entry.update(results=results, **summarize_pair(results, target, strict, probabilistic))
             atomic_json(summary_path, record)
             print(
-                f"{kind:30} {variant:18} {scenario:32} {index + 1:>3}/{trials} "
+                f"{kind:30} {variant:18} {scenario:32} {index + 1:>3}/{count} "
                 f"{trial['verdict']}{' detected' if trial.get('detected') else ''}",
                 file=sys.stderr,
                 flush=True,

@@ -90,3 +90,47 @@ lenient versus strict criteria, that every corpus pair validates against the ada
 and that the application and adapter agree on the variant list. It also has a static
 guard: correct-B uses serializable isolation, has no `FOR UPDATE`, and does not reuse
 A's functions.
+
+## Continuous integration
+
+[`.github/workflows/faultline.yml`](../../.github/workflows/faultline.yml) runs on pull
+requests and on manual dispatch. It never uses `pull_request_target`, uses no secrets, and
+has a read-only token. Every action is pinned to a full commit SHA, with the version
+in a comment.
+
+| Job | What must hold |
+| --- | --- |
+| `checks` | lint, format, unit tests; viewer tests; rebuilding the viewer must reproduce the committed assets exactly |
+| `correct` | every correct variant PASSes every applicable scenario once, including the promoted reduced regression; no Faultline resources are left behind |
+| `calibration` | every known-bad variant shows its declared violation (`--strict`), with no harness error |
+
+The calibration job does not "ignore exit code 1". The tool reads each run's own report
+and decides whether the *right* violation appeared. An INCONCLUSIVE or ERROR fails
+both gates. Evidence (JSON, Markdown, history, snapshots) is uploaded even when a job
+fails and kept for seven days. It contains only synthetic fixture data; per-run
+database passwords are generated inside the run and redacted from diagnostics. The
+step summary shows the calibration table.
+
+A single CI trial per pair is a smoke gate, not the 20-trial release calibration. A
+defect the corpus declares `probabilistic` (the crash between two commits, detected in
+6/20 trials) runs at least its `min_trials` (15) in CI and needs one detection with no
+harness ERROR; see decision L-062.
+
+## Measuring resource use
+
+[`measure.py`](../../src/faultline/measure.py) runs a scenario serially through the CLI
+while a background thread samples one-shot `docker stats` for Faultline-owned
+containers. It reports wall time (first, median, max), the peak working set per role
+and in total, and leaked containers or networks after every run. Samples are
+periodic, so peaks are lower bounds. The machine's own CPU and memory are recorded
+next to the numbers so nobody mistakes them for another machine's.
+
+To regenerate all M4 release evidence in serial stages:
+
+```bash
+scripts/release-evidence.sh defects .faultline/m4-release
+scripts/release-evidence.sh correct-a .faultline/m4-release
+scripts/release-evidence.sh correct-b .faultline/m4-release
+scripts/release-evidence.sh measure .faultline/m4-release
+scripts/release-evidence.sh integration .faultline/m4-release
+```

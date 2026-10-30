@@ -31,7 +31,10 @@
         "invariant_id": "orders.purchase_atomicity",
         "code": "non_atomic_purchase",
         "logical_id": "purchase-a"
-      }
+      },
+      "detection": "probabilistic",
+      "min_trials": 15,
+      "note": "The restart lands between the two commits only part of the time; 6/20 detections were measured on 2026-10-29."
     },
     {
       "defect": "lost_balance_update",

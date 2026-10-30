@@ -36,7 +36,8 @@ def test_plan_records_all_effective_deadline_defaults(scenario):
     limits = scenario.plan()["scenario"]["limits"]
     assert limits["provisioning_ms"] == 60000
     assert limits["execution_ms"] == 60000
-    assert limits["observation_ms"] == limits["verification_ms"] == 10000
+    assert limits["drain_ms"] == limits["observation_ms"] == 30000
+    assert limits["verification_ms"] == 10000
     assert limits["cleanup_ms"] == 30000
     assert limits["total_ms"] == 300000
 

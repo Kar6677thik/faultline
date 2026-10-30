@@ -247,8 +247,9 @@ class Fault(StrictModel):
 class Limits(StrictModel):
     execution_ms: Annotated[int, Field(ge=1, le=300000)] = 60000
     provisioning_ms: Annotated[int, Field(ge=1, le=300000)] = 60000
-    drain_ms: Annotated[int, Field(ge=1, le=300000)] = 10000
-    observation_ms: Annotated[int, Field(ge=1, le=300000)] = 10000
+    # Defaults leave room for helper start-up on a contended host (see decision L-061).
+    drain_ms: Annotated[int, Field(ge=1, le=300000)] = 30000
+    observation_ms: Annotated[int, Field(ge=1, le=300000)] = 30000
     verification_ms: Annotated[int, Field(ge=1, le=300000)] = 10000
     cleanup_ms: Annotated[int, Field(ge=1, le=300000)] = 30000
     total_ms: Annotated[int, Field(ge=1, le=900000)] = 300000

@@ -459,24 +459,33 @@ class Environment:
         return json.loads(stdout)
 
     def snapshot(self, role):
-        return self.call("observer", "snapshot", role, timeout=10)
+        # Bounded by the observing stage alarm; this only stops a hung transport.
+        return self.call("observer", "snapshot", role, timeout=60)
 
     def drain(self, timeout_ms):
+        # Helper calls share the drain budget instead of fixed per-call timeouts: a
+        # `docker exec` that starts Python can take several seconds on a busy host.
+        deadline = time.monotonic() + timeout_ms / 1000
+
+        def remaining():
+            return max(1.0, deadline - time.monotonic())
+
         app = self.containers["application"]
         self.assert_owned(app)
-        before = self.call("observer", "registry", "", timeout=5)
+        before = self.call("observer", "registry", "", timeout=remaining())
         self.bundle.event("inflight_before_drain", before)
-        app.stop(timeout=max(1, timeout_ms // 1000))
+        # Leave at least half of what remains for the post-exit evidence calls.
+        app.stop(timeout=max(1, int(remaining() / 2)))
         app.reload()
         if app.attrs["State"]["Running"]:
             return False
-        evidence = self.call("observer", "registry", "", timeout=5)
+        evidence = self.call("observer", "registry", "", timeout=remaining())
         self.bundle.event("inflight_after_exit", evidence)
         if evidence["application_sessions"] != 0 or any(
             row["session_alive"] for row in evidence["registrations"]
         ):
             return False
-        cleared = self.call("observer", "clear_registry", "", timeout=5)
+        cleared = self.call("observer", "clear_registry", "", timeout=remaining())
         self.bundle.event("inflight_stale_cleared", cleared)
         return app.attrs["State"]["ExitCode"] == 0
 

@@ -49,3 +49,29 @@ def test_keyboard_interrupt_cleans_and_is_not_pass(monkeypatch, tmp_path, scenar
     environment.cleanup.assert_called_once()
     assert report["lifecycle"] == "interrupted"
     assert report["verdict"] == "INCONCLUSIVE"
+
+
+def test_drain_helpers_share_the_stage_budget_instead_of_fixed_timeouts():
+    from unittest.mock import Mock
+
+    from faultline.environment import Environment
+
+    env = object.__new__(Environment)
+    app = Mock(attrs={"State": {"Running": False, "ExitCode": 0}})
+    env.containers = {"application": app}
+    env.assert_owned = Mock()
+    env.bundle = Mock()
+    replies = iter(
+        [
+            {"registrations": [], "application_sessions": 1},
+            {"registrations": [], "application_sessions": 0},
+            {"cleared": []},
+        ]
+    )
+    env.call = Mock(side_effect=lambda *a, **k: next(replies))
+    assert env.drain(30000) is True
+    timeouts = [call.kwargs["timeout"] for call in env.call.call_args_list]
+    # A slow helper start-up on a busy host no longer hits a hard-coded 5 s limit.
+    assert all(5 < value <= 30 for value in timeouts)
+    # The graceful stop may use at most half of what remains.
+    assert app.stop.call_args.kwargs["timeout"] <= 15
