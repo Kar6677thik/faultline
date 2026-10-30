@@ -2,9 +2,9 @@
 
 Faultline tests whether backend business rules survive retries and failures, using authoritative state rather than HTTP status alone.
 
-Faultline now includes concurrent experiments, materialized workloads, barriers and dependency gates, acknowledged database proxy faults and application restarts, and independent PostgreSQL verification. Milestone 2 is complete for the supported experiment engine; this is not the complete v1 release. The original unsafe/correct purchase demonstration remains a regression.
+Faultline runs concurrent experiments with materialized workloads, acknowledged database proxy faults, and application restarts, and checks the results with independent PostgreSQL verification. It also does strict replay, comparison, and dependency-aware reduction, and serves a read-only evidence viewer. It is calibrated against two business domains (orders and transfers), two independently written correct order implementations, and seven known defects. See [implementation status](docs/implementation-status.md) for what is measured and what is not.
 
-The stack is Python, FastAPI, PostgreSQL, and disposable Linux Docker containers. React remains planned for the later read-only report viewer. See the [full specification](specs/README.md), [implemented scope and limitations](docs/implementation-status.md), and [engineering principles](docs/engineering-principles.md) derived from the supplied field guide.
+The stack is Python, FastAPI, PostgreSQL, and disposable Linux Docker containers, with a packaged React viewer. See the [full specification](specs/README.md), [implemented scope and limitations](docs/implementation-status.md), and [engineering principles](docs/engineering-principles.md) derived from the supplied field guide.
 
 Learning the project? Start with the [plain-language learning guide](docs/learning/README.md): a complete purchase walkthrough, module explanations, glossary, decision log, and crash-recovery tutorial.
 
@@ -13,12 +13,13 @@ Learning the project? Start with the [plain-language learning guide](docs/learni
 Use Linux x86-64 or Debian/Ubuntu in WSL2 on Windows, Python 3.12 or 3.13, a local Docker Engine with Linux containers, and [uv](https://docs.astral.sh/uv/getting-started/installation/). Enable Docker Desktop integration for your WSL distribution. Run the following from this repository inside Linux/WSL; native PowerShell is not the execution platform.
 
 ```bash
+git clone https://github.com/Kar6677thik/faultline.git && cd faultline
 uv sync --frozen
-docker pull postgres@sha256:eee6c6e1b0894fa4fe0075eb054af9fd1cf39a35321c2d4110626cfe506411fb
-docker pull ghcr.io/shopify/toxiproxy@sha256:9378ed52a28bc50edc1350f936f518f31fa95f0d15917d6eb40b8e376d1a214e
-docker build -t faultline-runtime:0.1.0 .
+scripts/build-images.sh        # pulls pinned PostgreSQL/Toxiproxy, builds runtime + transfer images
 .venv/bin/faultline doctor
 ```
+
+No Node.js, credentials, or manual database setup are needed to run experiments or view reports. Measured costs on the reference machine (below): the local images are 238 MB each (they share layers), PostgreSQL is 423 MB, Toxiproxy 26 MB, and the Python base image 177 MB. `.venv` is 83 MB. With the base image already present, a no-cache runtime build took 9 s and the transfer image 1 s. First-time pulls depend on your network and were not measured. A warm reference run takes about 20-25 s.
 
 The first build/pull needs network access. Experiments use only locally available images and internal networks. Rebuild the runtime image after changes to `src/`, dependencies, or the Dockerfile; the host package and container must represent the same code revision. Docker image IDs are recorded in every run manifest. The multi-stage image contains the installed package and runtime dependencies, not the build toolchain.
 
@@ -87,6 +88,16 @@ Reduction deletes whole operations, faults, and retry suffixes, together with an
 ```
 
 The server is read-only and listens only on 127.0.0.1. It requires the fresh token from the printed URL, checks Host and Origin, rejects mutation methods, sends no CORS headers, and serves packaged assets with a strict Content-Security-Policy. Reloading the page drops the in-memory token; reopen the printed URL. From the run list you can reach a violation, its planned and observed attempts, the acknowledged fault, the exact baseline and final ledger rows, and replay, comparison, or reduction groups. Viewing needs no Node.js. To rebuild the viewer: `cd web && npm ci && npm test && npm run build`. See the [viewer guide](docs/learning/viewer.md).
+
+## Calibration, the second domain, and CI
+
+```bash
+python -m faultline.calibration examples/orders/corpus.json --trials 20 --output .faultline/calibration-orders
+python -m faultline.calibration examples/transfers/corpus.json --trials 20 --output .faultline/calibration-transfers
+python -m faultline.measure examples/orders/lost-response.yaml --variant correct --runs 20 --output .faultline/measure
+```
+
+The order application has eight variants: `correct` (correct-A), the independently written `correct_b`, and six single-defect variants. The transfer domain (`examples/transfers/`, adapter `bundled_transfers`) uses a capability-gated checkpoint to crash between a debit and its credit. Calibration runs every trial through the CLI and counts a defect as detected only by a completed FAIL containing its declared violation. `.github/workflows/faultline.yml` runs lint, unit, and viewer tests; then a correct-variant gate and a known-defect gate on Docker, uploading evidence for seven days. See [calibration](docs/learning/calibration.md), [transfers](docs/learning/transfers.md), and [measured release results](docs/m4-acceptance-results.md).
 
 Run/report exit codes: **0 PASS**, **1 FAIL**, **2 invalid input/preflight**, **3 INCONCLUSIVE**, **4 ERROR**, **130 interrupted**. Missing fault coverage cannot produce PASS. Cleanup failures produce ERROR while retaining available findings. Validation rejects features not implemented in this milestone.
 
